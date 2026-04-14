@@ -1,0 +1,7 @@
+cmake-build-debug
+cmake-build-release
+.idea
+copy.py
+no_comments.py
+send.py
+profiler.log
