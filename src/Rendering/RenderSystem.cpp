@@ -40,6 +40,12 @@ RenderSystem::RenderSystem(size_t reserveCapacity) : m_showDebug(false) {
     m_layer2.reserve(reserveCapacity);
     m_layer3.reserve(reserveCapacity);
 
+    m_cachedChunkLayer0.reserve(reserveCapacity);
+    m_cachedChunkLayer1.reserve(reserveCapacity);
+    m_cachedChunkLayer2.reserve(reserveCapacity);
+    m_cachedChunkLayer3.reserve(reserveCapacity);
+    m_cachedChunkVisibleTrees.reserve(500);
+
     if (!m_debugFont.loadFromFile("assets/fonts/Roboto-Bold.ttf")) {
         std::cerr << "[RenderSystem] Warning: Could not load debug font.\n";
     }
@@ -150,12 +156,12 @@ void RenderSystem::render(entt::registry& registry, sf::RenderWindow& window, co
             core::ScopedTimer cullTimer("4.2_Render_Cull_Entities");
             (void)registry.group<ecs::ScreenPos>(entt::get<ecs::SpriteComponent>);
 
-            m_layer0.clear(); m_layer1.clear(); m_layer2.clear(); m_layer3.clear();
-            visibleTrees.reserve(500);
-
             sf::FloatRect broadCullBounds = ctx.viewBounds;
             broadCullBounds.left -= 512.0f; broadCullBounds.top -= 512.0f;
             broadCullBounds.width += 1024.0f; broadCullBounds.height += 1024.0f;
+
+            float cullCenterX = broadCullBounds.left + (broadCullBounds.width * 0.5f);
+            float cullCenterY = broadCullBounds.top + (broadCullBounds.height * 0.5f);
 
             auto addToLayers = [&](entt::entity entity, float zOffset) {
                 if (registry.all_of<ecs::TreeTag>(entity)) visibleTrees.push_back(entity);
@@ -165,17 +171,109 @@ void RenderSystem::render(entt::registry& registry, sf::RenderWindow& window, co
                 else                       m_layer3.push_back(entity);
             };
 
+            std::vector<ChunkCullFingerprint> currentFingerprint;
+            currentFingerprint.reserve(sortedChunks.size());
+            size_t estimatedChunkEntityCount = 0;
             for (const auto* chunk : sortedChunks) {
-                for (entt::entity entity : chunk->entities) {
-                    if (!registry.valid(entity)) continue;
-                    const auto& sp = registry.get<ecs::ScreenPos>(entity);
-                    float zOffset = 0.0f;
-                    if (const auto* wp = registry.try_get<ecs::WorldPos>(entity)) zOffset = wp->wz;
+                currentFingerprint.push_back({chunk->coordinate, chunk->entities.size()});
+                estimatedChunkEntityCount += chunk->entities.size();
+            }
 
-                    if (!broadCullBounds.contains(sp.x, sp.y - zOffset)) continue;
-                    addToLayers(entity, zOffset);
+            bool fingerprintChanged = !m_chunkCullCacheValid || currentFingerprint.size() != m_chunkCullFingerprint.size();
+
+            if (!fingerprintChanged) {
+                for (size_t i = 0; i < currentFingerprint.size(); ++i) {
+                    const auto& a = currentFingerprint[i];
+                    const auto& b = m_chunkCullFingerprint[i];
+                    if (a.coord.x != b.coord.x || a.coord.y != b.coord.y || a.entityCount != b.entityCount) {
+                        fingerprintChanged = true;
+                        break;
+                    }
                 }
             }
+
+            bool projectionChanged = !m_chunkCullCacheValid ||
+                                     std::abs(currentAngle - m_lastCullAngle) > 0.001f ||
+                                     std::abs(currentZoom - m_lastCullZoom) > 0.001f;
+
+            bool cullWindowShifted = !m_hasLastCullCenter ||
+                                     std::abs(cullCenterX - m_lastCullCenterX) > 256.0f ||
+                                     std::abs(cullCenterY - m_lastCullCenterY) > 256.0f;
+
+            if (fingerprintChanged || projectionChanged || cullWindowShifted) {
+                m_cachedChunkLayer0.clear();
+                m_cachedChunkLayer1.clear();
+                m_cachedChunkLayer2.clear();
+                m_cachedChunkLayer3.clear();
+                m_cachedChunkVisibleTrees.clear();
+
+                m_cachedChunkLayer0.reserve(estimatedChunkEntityCount);
+                m_cachedChunkLayer1.reserve(estimatedChunkEntityCount);
+                m_cachedChunkLayer2.reserve(estimatedChunkEntityCount);
+                m_cachedChunkLayer3.reserve(estimatedChunkEntityCount);
+
+                auto addToCachedLayers = [&](entt::entity entity, float zOffset) {
+                    if (registry.all_of<ecs::TreeTag>(entity)) m_cachedChunkVisibleTrees.push_back(entity);
+                    if (zOffset < 0.1f)        m_cachedChunkLayer0.push_back(entity);
+                    else if (zOffset < 64.1f)  m_cachedChunkLayer1.push_back(entity);
+                    else if (zOffset < 128.1f) m_cachedChunkLayer2.push_back(entity);
+                    else                       m_cachedChunkLayer3.push_back(entity);
+                };
+
+                for (const auto* chunk : sortedChunks) {
+                    for (entt::entity entity : chunk->entities) {
+                        if (!registry.valid(entity)) continue;
+                        if (!registry.all_of<ecs::ScreenPos, ecs::SpriteComponent>(entity)) continue;
+                        if (!registry.all_of<ecs::ResourceTag>(entity)) continue;
+                        const auto& sp = registry.get<ecs::ScreenPos>(entity);
+                        float zOffset = 0.0f;
+                        if (const auto* wp = registry.try_get<ecs::WorldPos>(entity)) zOffset = wp->wz;
+
+                        if (!broadCullBounds.contains(sp.x, sp.y - zOffset)) continue;
+                        addToCachedLayers(entity, zOffset);
+                    }
+                }
+
+                FastSorter::sortByScreenY(m_cachedChunkLayer0, registry);
+                FastSorter::sortByScreenY(m_cachedChunkLayer1, registry);
+                FastSorter::sortByScreenY(m_cachedChunkLayer2, registry);
+                FastSorter::sortByScreenY(m_cachedChunkLayer3, registry);
+                FastSorter::sortByScreenY(m_cachedChunkVisibleTrees, registry);
+
+                m_chunkCullFingerprint = std::move(currentFingerprint);
+                m_lastCullAngle = currentAngle;
+                m_lastCullZoom = currentZoom;
+                m_lastCullCenterX = cullCenterX;
+                m_lastCullCenterY = cullCenterY;
+                m_hasLastCullCenter = true;
+                m_chunkCullCacheValid = true;
+            }
+
+            m_layer0 = m_cachedChunkLayer0;
+            m_layer1 = m_cachedChunkLayer1;
+            m_layer2 = m_cachedChunkLayer2;
+            m_layer3 = m_cachedChunkLayer3;
+            visibleTrees = m_cachedChunkVisibleTrees;
+
+            auto sanitizeLayer = [&](std::vector<entt::entity>& layer) {
+                layer.erase(std::remove_if(layer.begin(), layer.end(), [&](entt::entity e) {
+                    return !registry.valid(e) || !registry.all_of<ecs::ScreenPos, ecs::SpriteComponent>(e);
+                }), layer.end());
+            };
+
+            sanitizeLayer(m_layer0);
+            sanitizeLayer(m_layer1);
+            sanitizeLayer(m_layer2);
+            sanitizeLayer(m_layer3);
+
+            visibleTrees.erase(std::remove_if(visibleTrees.begin(), visibleTrees.end(), [&](entt::entity e) {
+                return !registry.valid(e) || !registry.all_of<ecs::TreeTag, ecs::ScreenPos, ecs::WorldPos>(e);
+            }), visibleTrees.end());
+
+            const size_t staticLayer0Count = m_layer0.size();
+            const size_t staticLayer1Count = m_layer1.size();
+            const size_t staticLayer2Count = m_layer2.size();
+            const size_t staticLayer3Count = m_layer3.size();
 
             auto dynamicView = registry.view<ecs::ScreenPos, ecs::SpriteComponent>(entt::exclude<ecs::ResourceTag>);
             for (auto entity : dynamicView) {
@@ -186,6 +284,22 @@ void RenderSystem::render(entt::registry& registry, sf::RenderWindow& window, co
                 if (!broadCullBounds.contains(sp.x, sp.y - zOffset)) continue;
                 addToLayers(entity, zOffset);
             }
+
+            auto screenYLess = [&](entt::entity a, entt::entity b) {
+                return registry.get<ecs::ScreenPos>(a).y < registry.get<ecs::ScreenPos>(b).y;
+            };
+
+            auto mergeDynamicIntoLayer = [&](std::vector<entt::entity>& layer, size_t staticCount) {
+                if (layer.size() <= staticCount) return;
+                auto mid = layer.begin() + staticCount;
+                std::sort(mid, layer.end(), screenYLess);
+                std::inplace_merge(layer.begin(), mid, layer.end(), screenYLess);
+            };
+
+            mergeDynamicIntoLayer(m_layer0, staticLayer0Count);
+            mergeDynamicIntoLayer(m_layer1, staticLayer1Count);
+            mergeDynamicIntoLayer(m_layer2, staticLayer2Count);
+            mergeDynamicIntoLayer(m_layer3, staticLayer3Count);
 
             auto pendingView = registry.view<ecs::PendingTaskArea>();
             for (auto e : pendingView) {
@@ -221,23 +335,22 @@ void RenderSystem::render(entt::registry& registry, sf::RenderWindow& window, co
             core::ScopedTimer drawEntTimer("4.4_Render_Entities");
             OverlayRenderer::renderLayer(ctx, registry, chunks, pendingL0, taskL0, dragData, 2, m_gameFont);
             GeometryRenderer::renderTier1_Faces(ctx, renderData);
-            EntityRenderer::renderEntities(ctx, registry, m_layer0, false, m_showDebug);
+            EntityRenderer::renderEntities(ctx, registry, m_layer0, true, m_showDebug);
             GeometryRenderer::renderTier1_Tops(ctx, renderData);
 
             OverlayRenderer::renderLayer(ctx, registry, chunks, pendingL1, taskL1, dragData, 4, m_gameFont);
             GeometryRenderer::renderTier2_Faces(ctx, renderData);
-            EntityRenderer::renderEntities(ctx, registry, m_layer1, false, m_showDebug);
+            EntityRenderer::renderEntities(ctx, registry, m_layer1, true, m_showDebug);
             GeometryRenderer::renderTier2_Tops(ctx, renderData);
 
             OverlayRenderer::renderLayer(ctx, registry, chunks, pendingL2, taskL2, dragData, 6, m_gameFont);
             GeometryRenderer::renderTier3_Faces(ctx, renderData);
-            EntityRenderer::renderEntities(ctx, registry, m_layer2, false, m_showDebug);
+            EntityRenderer::renderEntities(ctx, registry, m_layer2, true, m_showDebug);
             GeometryRenderer::renderTier3_Tops(ctx, renderData);
 
             OverlayRenderer::renderLayer(ctx, registry, chunks, pendingL3, taskL3, dragData, 8, m_gameFont);
-            EntityRenderer::renderEntities(ctx, registry, m_layer3, false, m_showDebug);
+            EntityRenderer::renderEntities(ctx, registry, m_layer3, true, m_showDebug);
 
-            FastSorter::sortByScreenY(visibleTrees, registry);
             CanopyRenderer::render(ctx, registry, visibleTrees);
         }
 

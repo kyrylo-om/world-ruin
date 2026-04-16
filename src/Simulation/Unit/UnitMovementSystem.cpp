@@ -42,8 +42,8 @@ void UnitMovementSystem::applyMovement(entt::entity entity, ecs::WorldPos& wp, e
                 auto newPath = req->futurePath.get();
                 if (newPath.empty()) {
                     dq.removeActionTarget.push_back(entity);
-                    wState.currentTask = entt::null;
-                    dq.removeWorkerTag.push_back(entity);
+                    // Don't release the worker — let UnitTaskSystem retry or reassign.
+                    // Releasing here strands couriers carrying items with no task.
                 } else {
                     dq.setPath.push_back({entity, ecs::Path{newPath, 0}});
                 }

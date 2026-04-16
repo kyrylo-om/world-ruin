@@ -1,6 +1,7 @@
 #include "../../../../include/Simulation/Unit/Combat/CombatMovement.hpp"
 #include "ECS/Components.hpp"
 #include "ECS/Tags.hpp"
+#include "Core/SimLogger.hpp"
 #include <cmath>
 #include <cstdlib>
 #include <algorithm>
@@ -126,45 +127,50 @@ math::Vec2f CombatMovement::calculateIntent(entt::registry& registry, entt::enti
         bool shouldMove = true;
 
         if (uData.type == ecs::UnitType::Courier && uData.heldItem != ecs::HeldItem::None && registry.all_of<ecs::BuildingTag>(actionTarget->target) && !registry.all_of<ecs::CityStorageTag>(actionTarget->target)) {
-            auto& cData = registry.get<ecs::ConstructionData>(actionTarget->target);
-            bool isFull = cData.isBuilt;
+            // Skip capacity check when courier is directly supplying this building
+            // (simulation mode: currentTask = building). Always let it deliver.
+            bool directSupply = (wState.currentTask == actionTarget->target);
 
-            if (!isFull) {
-                float nextProgress = cData.buildProgress + 0.3f;
-                float progressRatio = std::min(nextProgress / cData.maxTime, 1.0f);
-                int expectedWood = static_cast<int>(cData.initialWood * progressRatio);
-                int expectedRock = static_cast<int>(cData.initialRock * progressRatio);
+            if (!directSupply) {
+                auto& cData = registry.get<ecs::ConstructionData>(actionTarget->target);
+                bool isFull = cData.isBuilt;
 
-                bool needsWood = (cData.initialWood - cData.woodRequired) < expectedWood;
-                bool needsRock = (cData.initialRock - cData.rockRequired) < expectedRock;
+                if (!isFull) {
+                    float nextProgress = cData.buildProgress + 0.3f;
+                    float progressRatio = std::min(nextProgress / cData.maxTime, 1.0f);
+                    int expectedWood = static_cast<int>(cData.initialWood * progressRatio);
+                    int expectedRock = static_cast<int>(cData.initialRock * progressRatio);
 
-                float minX = targetPos.x - cData.resourceZoneWidth / 2.0f;
-                float maxX = targetPos.x + cData.resourceZoneWidth / 2.0f;
-                float minY = targetPos.y - cData.resourceZoneHeight / 2.0f;
-                float maxY = targetPos.y + cData.resourceZoneHeight / 2.0f;
+                    bool needsWood = (cData.initialWood - cData.woodRequired) < expectedWood;
+                    bool needsRock = (cData.initialRock - cData.rockRequired) < expectedRock;
 
-                int woodOnGround = 0;
-                int rockOnGround = 0;
-                auto resView = registry.view<ecs::WorldPos, ecs::ResourceTag>();
-                for (auto r : resView) {
-                    auto& rWp = resView.get<ecs::WorldPos>(r);
-                    if (rWp.wx >= minX && rWp.wx <= maxX && rWp.wy >= minY && rWp.wy <= maxY) {
-                        if (registry.all_of<ecs::LogTag>(r)) woodOnGround++;
-                        if (registry.all_of<ecs::SmallRockTag>(r)) rockOnGround++;
+                    float minX = targetPos.x - cData.resourceZoneWidth / 2.0f;
+                    float maxX = targetPos.x + cData.resourceZoneWidth / 2.0f;
+                    float minY = targetPos.y - cData.resourceZoneHeight / 2.0f;
+                    float maxY = targetPos.y + cData.resourceZoneHeight / 2.0f;
+
+                    int woodOnGround = 0;
+                    int rockOnGround = 0;
+                    auto resView = registry.view<ecs::WorldPos, ecs::ResourceTag>();
+                    for (auto r : resView) {
+                        auto& rWp = resView.get<ecs::WorldPos>(r);
+                        if (rWp.wx >= minX && rWp.wx <= maxX && rWp.wy >= minY && rWp.wy <= maxY) {
+                            if (registry.all_of<ecs::LogTag>(r)) woodOnGround++;
+                            if (registry.all_of<ecs::SmallRockTag>(r)) rockOnGround++;
+                        }
                     }
+
+                    if (uData.heldItem == ecs::HeldItem::Wood && (woodOnGround >= cData.woodRequired || !needsWood)) isFull = true;
+                    if (uData.heldItem == ecs::HeldItem::Rock && (rockOnGround >= cData.rockRequired || !needsRock)) isFull = true;
                 }
 
-                if (uData.heldItem == ecs::HeldItem::Wood && (woodOnGround >= cData.woodRequired || !needsWood)) isFull = true;
-                if (uData.heldItem == ecs::HeldItem::Rock && (rockOnGround >= cData.rockRequired || !needsRock)) isFull = true;
-            }
-
-            if (isFull) {
-
-                if (wState.currentTask != entt::null) {
-                    dq.setActionTarget.push_back({entity, wState.currentTask});
-                    dq.removePath.push_back(entity);
-                    dq.removePathRequest.push_back(entity);
-                    return {0.0f, 0.0f};
+                if (isFull) {
+                    if (wState.currentTask != entt::null) {
+                        dq.setActionTarget.push_back({entity, wState.currentTask});
+                        dq.removePath.push_back(entity);
+                        dq.removePathRequest.push_back(entity);
+                        return {0.0f, 0.0f};
+                    }
                 }
             }
         }
@@ -255,10 +261,47 @@ math::Vec2f CombatMovement::calculateIntent(entt::registry& registry, entt::enti
 
             if (dist > effectiveRadius - 0.1f) {
                 if (!registry.all_of<ecs::Path>(entity) && !registry.all_of<ecs::PathRequest>(entity)) {
+                    // Track how long this unit has been doing direct walk (no path)
+                    // toward a target — if blocked by terrain for too long, give up.
+                    // Applies to ALL unit types targeting entities with Health.
+                    if (registry.all_of<ecs::Health>(actionTarget->target)) {
+                        wState.directMoveTimer += dt;
+                        if (wState.directMoveTimer > 0.5f && static_cast<int>(wState.directMoveTimer * 4) % 4 == 0) {
+                            core::SimLogger::get().log("[StuckDetect] " + std::string(core::SimLogger::typeName(uData.type))
+                                + " #" + std::to_string(core::SimLogger::eid(entity))
+                                + " DIRECT WALK for " + std::to_string(wState.directMoveTimer).substr(0, 4) + "s"
+                                + " toward #" + std::to_string(core::SimLogger::eid(actionTarget->target))
+                                + " | dist=" + std::to_string(dist).substr(0, 4)
+                                + " effRadius=" + std::to_string(effectiveRadius).substr(0, 4)
+                                + " | unitPos=" + core::SimLogger::pos(wp.wx, wp.wy)
+                                + " targetPos=" + core::SimLogger::pos(targetPos.x, targetPos.y)
+                                + " | pathFailures=" + std::to_string(wState.pathFailures));
+                        }
+                        if (wState.directMoveTimer > 2.0f) {
+                            core::SimLogger::get().log("[StuckDetect] " + std::string(core::SimLogger::typeName(uData.type))
+                                + " #" + std::to_string(core::SimLogger::eid(entity))
+                                + " GIVING UP on #" + std::to_string(core::SimLogger::eid(actionTarget->target))
+                                + " after " + std::to_string(wState.directMoveTimer).substr(0, 4) + "s direct walk"
+                                + " | dist=" + std::to_string(dist).substr(0, 4)
+                                + " from " + core::SimLogger::pos(wp.wx, wp.wy));
+                            wState.lastFailedTarget = actionTarget->target;
+                            wState.directMoveTimer = 0.0f;
+                            dq.removeActionTarget.push_back(entity);
+                            if (registry.all_of<ecs::ClaimedTag>(actionTarget->target)) {
+                                dq.removeClaimedTag.push_back(actionTarget->target);
+                            }
+                            dq.removePath.push_back(entity);
+                            dq.removePathRequest.push_back(entity);
+                            return {0.0f, 0.0f};
+                        }
+                    }
                     moveIntent = {dx / dist, dy / dist};
+                } else {
+                    wState.directMoveTimer = 0.0f;
                 }
                 vel.facingAngle = std::atan2(dy, dx) * 180.0f / 3.14159265f;
             } else {
+                wState.directMoveTimer = 0.0f;
                 outIsAttackingCommand = true;
                 dq.removePath.push_back(entity);
 

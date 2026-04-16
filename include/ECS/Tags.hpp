@@ -12,6 +12,7 @@ namespace wr::ecs {
     struct OneShotAnimTag {};
 
     struct ResourceTag {};
+    struct ActiveResourceUpdateTag {};
     struct RockTag {};
     struct SmallRockTag {};
     struct TreeTag {};

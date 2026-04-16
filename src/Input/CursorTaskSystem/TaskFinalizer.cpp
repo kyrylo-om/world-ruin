@@ -1,5 +1,6 @@
 #include "../../../../include/Input/CursorTaskSystem/TaskFinalizer.hpp"
 #include "ECS/Tags.hpp"
+#include <algorithm>
 
 namespace wr::input {
 
@@ -8,7 +9,62 @@ void TaskFinalizer::cancelTask(entt::registry& registry) {
     registry.clear<ecs::PendingTaskArea>();
 }
 
-void TaskFinalizer::finalizeTask(entt::registry& registry, ecs::PendingTaskArea& pArea, int& globalTaskId) {
+void TaskFinalizer::scanResources(entt::registry& registry, const ecs::PendingTaskArea& pArea) {
+    auto resView = registry.view<ecs::WorldPos, ecs::ResourceTag>();
+    for (auto e : resView) {
+        auto& wp = resView.get<ecs::WorldPos>(e);
+        bool match = false;
+
+        for (const auto& rect : pArea.areas) {
+            float minX = std::min(rect.startWorld.x, rect.endWorld.x);
+            float maxX = std::max(rect.startWorld.x, rect.endWorld.x);
+            float minY = std::min(rect.startWorld.y, rect.endWorld.y);
+            float maxY = std::max(rect.startWorld.y, rect.endWorld.y);
+
+            if (wp.wx >= minX && wp.wx <= maxX && wp.wy >= minY && wp.wy <= maxY) {
+                if (rect.includeTrees && registry.all_of<ecs::TreeTag>(e)) match = true;
+                if (rect.includeRocks && registry.all_of<ecs::RockTag>(e)) match = true;
+                if (rect.includeSmallRocks && registry.all_of<ecs::SmallRockTag>(e)) match = true;
+                if (rect.includeBushes && registry.all_of<ecs::BushTag>(e)) match = true;
+                if (rect.includeLogs && registry.all_of<ecs::LogTag>(e)) match = true;
+                if (match) break;
+            }
+        }
+
+        if (match && pArea.hasDropoff) {
+            float dMinX = std::min(pArea.dropoffStart.x, pArea.dropoffEnd.x);
+            float dMaxX = std::max(pArea.dropoffStart.x, pArea.dropoffEnd.x);
+            float dMinY = std::min(pArea.dropoffStart.y, pArea.dropoffEnd.y);
+            float dMaxY = std::max(pArea.dropoffStart.y, pArea.dropoffEnd.y);
+            if (wp.wx >= dMinX && wp.wx <= dMaxX && wp.wy >= dMinY && wp.wy <= dMaxY) {
+                match = false;
+            }
+        }
+
+        if (match) {
+            auto bView = registry.view<ecs::BuildingTag, ecs::WorldPos, ecs::ConstructionData>();
+            for (auto bEnt : bView) {
+                auto& bWp = bView.get<ecs::WorldPos>(bEnt);
+                auto& cData = bView.get<ecs::ConstructionData>(bEnt);
+                if (!cData.isBuilt || registry.all_of<ecs::CityStorageTag>(bEnt)) {
+                    float bMinX = bWp.wx - cData.resourceZoneWidth / 2.0f;
+                    float bMaxX = bWp.wx + cData.resourceZoneWidth / 2.0f;
+                    float bMinY = bWp.wy - cData.resourceZoneHeight / 2.0f;
+                    float bMaxY = bWp.wy + cData.resourceZoneHeight / 2.0f;
+                    if (wp.wx >= bMinX && wp.wx <= bMaxX && wp.wy >= bMinY && wp.wy <= bMaxY) {
+                        match = false;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (match) registry.emplace<ecs::PreviewHarvestTag>(e, sf::Color(255, 255, 255, 255));
+    }
+}
+
+entt::entity TaskFinalizer::finalizeTask(entt::registry& registry, ecs::PendingTaskArea& pArea,
+                                          int& globalTaskId, const std::vector<entt::entity>& workers) {
     auto previewView = registry.view<ecs::PreviewHarvestTag>();
     bool markedAny = false;
 
@@ -37,13 +93,12 @@ void TaskFinalizer::finalizeTask(entt::registry& registry, ecs::PendingTaskArea&
     bool courierOnlyTask = !hasHarvestWork && (pArea.collectFutureDrops || log > 0 || smallRock > 0 || !pArea.targetBuildings.empty());
 
     if (markedAny || pArea.hasDropoff || !pArea.targetBuildings.empty() || courierOnlyTask) {
-        auto selectedUnits = registry.view<ecs::SelectedTag, ecs::UnitData, ecs::WorkerState>();
-        for (auto e : selectedUnits) {
-            auto& uData = selectedUnits.get<ecs::UnitData>(e);
+        for (auto e : workers) {
+            if (!registry.valid(e)) continue;
+            auto& uData = registry.get<ecs::UnitData>(e);
             bool canHelp = false;
 
             if (courierOnlyTask) {
-
                 if (uData.type == ecs::UnitType::Courier) {
                     bool hasDestination = pArea.hasDropoff || !pArea.targetBuildings.empty() || pArea.useCityStorage;
                     if (hasDestination) canHelp = true;
@@ -67,7 +122,10 @@ void TaskFinalizer::finalizeTask(entt::registry& registry, ecs::PendingTaskArea&
         }
     } else {
         registry.destroy(areaEntity);
+        return entt::null;
     }
+
+    return areaEntity;
 }
 
 }

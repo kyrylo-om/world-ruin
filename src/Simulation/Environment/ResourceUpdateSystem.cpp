@@ -4,18 +4,19 @@
 #include "ECS/Components.hpp"
 #include "ECS/Tags.hpp"
 #include <cmath>
+#include <vector>
+#include <algorithm>
 
 namespace wr::simulation {
 
 void ResourceUpdateSystem::update(entt::registry& registry, float dt, const std::vector<world::Chunk*>& activeChunks, world::ChunkManager& chunkManager) {
     const auto* tilesPtr = registry.ctx().find<const rendering::TileHandler*>();
 
-    auto dropView = registry.view<ecs::WorldPos, ecs::Velocity>();
-    for (auto e : dropView) {
-        if (!registry.all_of<ecs::LogTag>(e) && !registry.all_of<ecs::SmallRockTag>(e)) continue;
-
-        auto& wp = dropView.get<ecs::WorldPos>(e);
-        auto& vel = dropView.get<ecs::Velocity>(e);
+    auto updateDrop = [&](entt::entity entity, ecs::WorldPos& wp, ecs::Velocity& vel) -> bool {
+        bool isMoving = (wp.zJump > 0.0f || wp.zJumpVel != 0.0f || std::abs(vel.dx) > 0.001f || std::abs(vel.dy) > 0.001f);
+        if (!isMoving) {
+            return false;
+        }
 
         if (wp.zJump > 0.0f || wp.zJumpVel != 0.0f) {
             wp.wx += vel.dx * dt;
@@ -39,30 +40,44 @@ void ResourceUpdateSystem::update(entt::registry& registry, float dt, const std:
                     vel.dx = 0.0f;
                     vel.dy = 0.0f;
 
-                    if (auto* lp = registry.try_get<ecs::LogicalPos>(e)) {
+                    if (auto* lp = registry.try_get<ecs::LogicalPos>(entity)) {
                         lp->x = static_cast<int64_t>(std::floor(wp.wx));
                         lp->y = static_cast<int64_t>(std::floor(wp.wy));
                     }
                 }
             }
         }
-    }
+
+        return (wp.zJump > 0.0f || wp.zJumpVel != 0.0f || std::abs(vel.dx) > 0.001f || std::abs(vel.dy) > 0.001f);
+    };
 
     std::vector<entt::entity> brokenResources;
-    auto resView = registry.view<ecs::ResourceData>();
+    std::vector<entt::entity> inactiveResources;
+    auto activeResources = registry.view<ecs::ResourceData, ecs::ActiveResourceUpdateTag>();
 
-    for (auto entity : resView) {
-        auto& resData = resView.get<ecs::ResourceData>(entity);
+    for (auto entity : activeResources) {
+        auto& resData = activeResources.get<ecs::ResourceData>(entity);
+        bool keepActive = false;
+
+        if (auto* wp = registry.try_get<ecs::WorldPos>(entity)) {
+            if (auto* vel = registry.try_get<ecs::Velocity>(entity)) {
+                if (registry.all_of<ecs::LogTag>(entity) || registry.all_of<ecs::SmallRockTag>(entity)) {
+                    if (updateDrop(entity, *wp, *vel)) keepActive = true;
+                }
+            }
+        }
 
         if (resData.shakeTimer > 0.0f) {
             resData.shakeTimer -= dt;
             if (resData.shakeTimer < 0.0f) resData.shakeTimer = 0.0f;
+            if (resData.shakeTimer > 0.0f) keepActive = true;
         }
 
         if (!resData.isDestroyed) {
             if (auto* health = registry.try_get<ecs::Health>(entity)) {
                 if (health->current <= 0) {
                     resData.isDestroyed = true;
+                    keepActive = true;
                     brokenResources.push_back(entity);
 
                     if (tilesPtr) {
@@ -73,11 +88,42 @@ void ResourceUpdateSystem::update(entt::registry& registry, float dt, const std:
                 }
             }
         }
+
+        if (!keepActive && registry.valid(entity)) {
+            inactiveResources.push_back(entity);
+        }
     }
 
     for (auto e : brokenResources) registry.destroy(e);
 
-    for (world::Chunk* chunk : activeChunks) {
+    for (auto e : inactiveResources) {
+        if (registry.valid(e) && registry.all_of<ecs::ActiveResourceUpdateTag>(e)) {
+            registry.remove<ecs::ActiveResourceUpdateTag>(e);
+        }
+    }
+
+    static float cleanupAccumulator = 0.0f;
+    cleanupAccumulator += dt;
+    const bool shouldCleanup = !brokenResources.empty() || cleanupAccumulator >= 0.25f;
+
+    if (!shouldCleanup) {
+        return;
+    }
+
+    cleanupAccumulator = 0.0f;
+
+    if (activeChunks.empty()) {
+        return;
+    }
+
+    static size_t cleanupCursor = 0;
+    constexpr size_t CHUNKS_PER_CLEANUP_STEP = 4;
+
+    cleanupCursor %= activeChunks.size();
+    const size_t chunksToClean = std::min(CHUNKS_PER_CLEANUP_STEP, activeChunks.size());
+
+    for (size_t i = 0; i < chunksToClean; ++i) {
+        world::Chunk* chunk = activeChunks[(cleanupCursor + i) % activeChunks.size()];
         chunk->entities.erase(
             std::remove_if(chunk->entities.begin(), chunk->entities.end(),
                 [&](entt::entity e) { return !registry.valid(e); }),
@@ -94,6 +140,8 @@ void ResourceUpdateSystem::update(entt::registry& registry, float dt, const std:
             }
         }
     }
+
+    cleanupCursor = (cleanupCursor + chunksToClean) % activeChunks.size();
 }
 
 }

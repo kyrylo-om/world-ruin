@@ -1,8 +1,9 @@
 #include "Simulation/World/OverseerSystem.hpp"
+#include "Simulation/BuildingPlacement.hpp"
 #include "ECS/Tags.hpp"
 #include "Config/BuildingsConfig.hpp"
+#include "Core/SimLogger.hpp"
 #include <cmath>
-#include <iostream>
 #include <vector>
 #include <algorithm>
 
@@ -48,160 +49,6 @@ static std::vector<math::Vec2f> generateHouseGrid(math::Vec2f storagePos, int co
         result.push_back(candidates[i].pos);
     }
     return result;
-}
-
-static bool isValidBuildSpot(world::ChunkManager& chunkManager, float px, float py) {
-    int bx = static_cast<int>(std::floor(px));
-    int by = static_cast<int>(std::floor(py));
-
-    auto info = chunkManager.getGlobalTileInfo(bx, by);
-    if (info.type == core::TerrainType::Water || info.isRamp) return false;
-
-    for (int dy = -1; dy <= 1; dy++) {
-        for (int dx = -1; dx <= 1; dx++) {
-            auto nInfo = chunkManager.getGlobalTileInfo(bx + dx, by + dy);
-            if (nInfo.elevationLevel != info.elevationLevel ||
-                nInfo.type == core::TerrainType::Water || nInfo.isRamp) {
-                return false;
-            }
-        }
-    }
-    return true;
-}
-
-static uint8_t getElevationAt(world::ChunkManager& chunkManager, float px, float py) {
-    return chunkManager.getGlobalTileInfo(
-        static_cast<int>(std::floor(px)),
-        static_cast<int>(std::floor(py))
-    ).elevationLevel;
-}
-
-static bool overlapsExistingBuilding(entt::registry& registry, math::Vec2f pos, const config::BuildingDef& bDef) {
-    float hw = bDef.hitboxWidth / 2.0f;
-    float hh = bDef.hitboxHeight / 2.0f;
-    float minX = pos.x - hw, maxX = pos.x + hw;
-    float minY = pos.y - hh, maxY = pos.y + hh;
-
-    auto bView = registry.view<ecs::BuildingTag, ecs::WorldPos>();
-    for (auto e : bView) {
-        auto& bWp = bView.get<ecs::WorldPos>(e);
-        float entityRad = 0.4f;
-        if (auto* hb = registry.try_get<ecs::Hitbox>(e)) entityRad = hb->radius / 64.0f;
-
-        if (bWp.wx + entityRad > minX && bWp.wx - entityRad < maxX &&
-            bWp.wy + entityRad > minY && bWp.wy - entityRad < maxY) {
-            return true;
-        }
-    }
-
-    float rw = bDef.resourceZoneWidth / 2.0f;
-    float rh = bDef.resourceZoneHeight / 2.0f;
-    float rMinX = pos.x - rw, rMaxX = pos.x + rw;
-    float rMinY = pos.y - rh, rMaxY = pos.y + rh;
-
-    auto storageView = registry.view<ecs::CityStorageTag, ecs::WorldPos>();
-    for (auto s : storageView) {
-        auto& sWp = storageView.get<ecs::WorldPos>(s);
-        float sRw = config::CITY_STORAGE.resourceZoneWidth / 2.0f;
-        float sRh = config::CITY_STORAGE.resourceZoneHeight / 2.0f;
-        if (!(rMaxX < sWp.wx - sRw || rMinX > sWp.wx + sRw ||
-              rMaxY < sWp.wy - sRh || rMinY > sWp.wy + sRh)) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-static entt::entity placeBuilding(entt::registry& registry, const config::BuildingDef& bDef,
-                                   math::Vec2f pos, uint8_t elevLevel, bool isStorage, int& globalTaskId) {
-    float zHeight = (elevLevel - 1) * 32.0f;
-
-    auto bEnt = registry.create();
-    registry.emplace<ecs::BuildingTag>(bEnt);
-    if (isStorage) registry.emplace<ecs::CityStorageTag>(bEnt);
-
-    registry.emplace<ecs::LogicalPos>(bEnt, static_cast<int64_t>(pos.x), static_cast<int64_t>(pos.y));
-    registry.emplace<ecs::WorldPos>(bEnt, pos.x, pos.y, zHeight, zHeight);
-    registry.emplace<ecs::ScreenPos>(bEnt, 0.f, 0.f, 255.0f, 255.0f, static_cast<uint8_t>(0));
-    registry.emplace<ecs::Hitbox>(bEnt, (bDef.hitboxWidth * 64.0f) / 2.0f);
-    registry.emplace<ecs::ClickArea>(bEnt, (bDef.hitboxWidth * 64.0f) / 2.0f);
-    registry.emplace<ecs::SolidTag>(bEnt);
-
-    bool instant = (bDef.buildTime <= 0.0f);
-    registry.emplace<ecs::ConstructionData>(bEnt,
-        bDef.cost.wood, bDef.cost.rock,
-        instant ? 0 : bDef.cost.wood,
-        instant ? 0 : bDef.cost.rock,
-        bDef.resourceZoneWidth, bDef.resourceZoneHeight,
-        instant, instant ? bDef.buildTime : 0.0f, bDef.buildTime
-    );
-
-    auto* tilesPtr = registry.ctx().find<const rendering::TileHandler*>();
-    auto& spr = registry.emplace<ecs::SpriteComponent>(bEnt).sprite;
-    if (tilesPtr) {
-        spr.setTexture((*tilesPtr)->getHouse1Texture());
-        auto bounds = spr.getLocalBounds();
-        spr.setOrigin(bounds.width / 2.0f, bounds.height * 0.65f);
-
-        if (isStorage) {
-            spr.setScale(2.4f, 2.4f);
-            spr.setColor(sf::Color(150, 200, 255));
-        } else {
-            spr.setScale(1.8f, 1.8f);
-        }
-    }
-
-    return bEnt;
-}
-
-static void clearBuildingSite(entt::registry& registry, const config::BuildingDef& bDef,
-                               math::Vec2f pos, int& globalTaskId) {
-    float hw = bDef.resourceZoneWidth / 2.0f;
-    float hh = bDef.resourceZoneHeight / 2.0f;
-    float minX = pos.x - hw, maxX = pos.x + hw;
-    float minY = pos.y - hh, maxY = pos.y + hh;
-
-    std::vector<entt::entity> toMark;
-    auto resView = registry.view<ecs::WorldPos>();
-    for (auto e : resView) {
-        if (registry.any_of<ecs::TreeTag, ecs::RockTag, ecs::SmallRockTag, ecs::BushTag, ecs::LogTag>(e) &&
-            !registry.any_of<ecs::MarkedForHarvestTag>(e)) {
-            auto& wp = resView.get<ecs::WorldPos>(e);
-            if (wp.wx >= minX && wp.wx <= maxX && wp.wy >= minY && wp.wy <= maxY) {
-                toMark.push_back(e);
-            }
-        }
-    }
-
-    if (!toMark.empty()) {
-        ecs::RectArea rect{
-            math::Vec2f{minX, minY}, math::Vec2f{maxX, maxY},
-            true, true, true, true, true, true, true, true, true, true
-        };
-        auto taskEnt = registry.create();
-        sf::Color taskCol(255, 50, 50, 80);
-        registry.emplace<ecs::TaskArea>(taskEnt, std::vector<ecs::RectArea>{rect},
-            std::vector<entt::entity>{}, taskCol, globalTaskId++, false,
-            math::Vec2f{0, 0}, math::Vec2f{0, 0}, true, true);
-
-        sf::Color solidCol(255, 50, 50, 255);
-        for (auto e : toMark) {
-            registry.emplace<ecs::MarkedForHarvestTag>(e, solidCol, taskEnt);
-        }
-
-        auto workers = registry.view<ecs::UnitData, ecs::WorkerState>();
-        for (auto w : workers) {
-            if (!registry.all_of<ecs::WorkerTag>(w)) {
-                auto type = workers.get<ecs::UnitData>(w).type;
-                if (type == ecs::UnitType::Warrior || type == ecs::UnitType::Lumberjack || type == ecs::UnitType::Miner) {
-                    registry.get<ecs::WorkerState>(w).currentTask = taskEnt;
-                    registry.emplace_or_replace<ecs::WorkerTag>(w);
-                    registry.remove<ecs::IdleTag>(w);
-                }
-            }
-        }
-    }
 }
 
 static void queueBuildingForBuilders(entt::registry& registry, entt::entity bEnt) {
@@ -251,21 +98,31 @@ void OverseerSystem::planExpansion(entt::registry& registry, world::ChunkManager
     case ExpansionPhase::PlaceStorage: {
         auto storageView = registry.view<ecs::CityStorageTag, ecs::WorldPos>();
         if (storageView.begin() != storageView.end()) {
-            m_phase = ExpansionPhase::PlanInitialHousing;
-            std::cout << "[Overseer] Storage exists. Moving to initial housing." << std::endl;
+            m_phase = ExpansionPhase::ClearHousingArea;
+            core::SimLogger::get().log("[Expansion] Storage exists. Phase: ClearHousingArea");
             break;
         }
 
         math::Vec2f searchCenter{10.0f, 10.0f};
         bool found = false;
         math::Vec2f bestSpot;
+        bool foundTerrainOnly = false;
+        math::Vec2f bestTerrainSpot;
 
         for (float r = 2.0f; r < 30.0f && !found; r += 2.0f) {
             for (float angle = 0.0f; angle < 6.28f; angle += 0.5f) {
                 float px = searchCenter.x + std::cos(angle) * r;
                 float py = searchCenter.y + std::sin(angle) * r;
 
-                if (!isValidBuildSpot(chunkManager, px, py)) continue;
+                if (!isTerrainValid(chunkManager, {px, py}, config::CITY_STORAGE)) continue;
+
+                if (!foundTerrainOnly) {
+                    foundTerrainOnly = true;
+                    bestTerrainSpot = {px, py};
+                }
+
+                if (hasObstacleOverlap(registry, {px, py}, config::CITY_STORAGE) ||
+                    hasResourceZoneOverlap(registry, {px, py}, config::CITY_STORAGE, true)) continue;
 
                 bestSpot = {px, py};
                 found = true;
@@ -274,15 +131,87 @@ void OverseerSystem::planExpansion(entt::registry& registry, world::ChunkManager
         }
 
         if (found) {
-            uint8_t elev = getElevationAt(chunkManager, bestSpot.x, bestSpot.y);
-            auto storageEnt = placeBuilding(registry, config::CITY_STORAGE, bestSpot, elev, true, m_globalTaskId);
-
+            auto storageEnt = spawnBuilding(registry, chunkManager, config::CITY_STORAGE, bestSpot, true);
             registry.emplace<SpawnedFlag>(storageEnt);
 
-            clearBuildingSite(registry, config::CITY_STORAGE, bestSpot, m_globalTaskId);
+            float buffer = 1.5f;
+            float hw = config::CITY_STORAGE.hitboxWidth / 2.0f + buffer;
+            float hh = config::CITY_STORAGE.hitboxHeight / 2.0f + buffer;
+            createTask(registry,
+                {bestSpot.x - hw, bestSpot.y - hh}, {bestSpot.x + hw, bestSpot.y + hh},
+                true, true, false, {0,0}, {0,0});
 
-            m_phase = ExpansionPhase::PlanInitialHousing;
-            std::cout << "[Overseer] City Storage placed at (" << bestSpot.x << ", " << bestSpot.y << ")." << std::endl;
+            m_phase = ExpansionPhase::ClearHousingArea;
+            core::SimLogger::get().log("[Expansion] City Storage placed at " + core::SimLogger::pos(bestSpot.x, bestSpot.y) + ". Phase: ClearHousingArea");
+        } else if (foundTerrainOnly) {
+            m_pendingStoragePos = bestTerrainSpot;
+
+            float buffer = 1.5f;
+            float hw = config::CITY_STORAGE.hitboxWidth / 2.0f + buffer;
+            float hh = config::CITY_STORAGE.hitboxHeight / 2.0f + buffer;
+            float maxX = bestTerrainSpot.x + hw;
+            float minY = bestTerrainSpot.y - hh;
+            float maxY = bestTerrainSpot.y + hh;
+            m_clearingTask = createTask(registry,
+                {bestTerrainSpot.x - hw, minY}, {maxX, maxY},
+                true, false, true, {maxX + 0.5f, minY}, {maxX + 3.0f, maxY});
+
+            m_phase = ExpansionPhase::ClearForStorage;
+            core::SimLogger::get().log("[Expansion] No clear spot for storage. Clearing area at " + core::SimLogger::pos(bestTerrainSpot.x, bestTerrainSpot.y) + ". Phase: ClearForStorage");
+        }
+        break;
+    }
+
+    case ExpansionPhase::ClearForStorage: {
+        // Wait for clearing task to fully complete (all resources harvested, all drops delivered)
+        if (m_clearingTask != entt::null && registry.valid(m_clearingTask))
+            break;
+
+        m_clearingTask = entt::null;
+
+        if (!hasObstacleOverlap(registry, m_pendingStoragePos, config::CITY_STORAGE) &&
+            !hasResourceZoneOverlap(registry, m_pendingStoragePos, config::CITY_STORAGE, true)) {
+            auto storageEnt = spawnBuilding(registry, chunkManager, config::CITY_STORAGE, m_pendingStoragePos, true);
+            registry.emplace<SpawnedFlag>(storageEnt);
+
+            m_phase = ExpansionPhase::ClearHousingArea;
+            core::SimLogger::get().log("[Expansion] Area cleared. City Storage placed at " + core::SimLogger::pos(m_pendingStoragePos.x, m_pendingStoragePos.y) + ". Phase: ClearHousingArea");
+        }
+        break;
+    }
+
+    case ExpansionPhase::ClearHousingArea: {
+        auto storageView = registry.view<ecs::CityStorageTag, ecs::WorldPos>();
+        if (storageView.begin() == storageView.end()) {
+            m_phase = ExpansionPhase::PlaceStorage;
+            break;
+        }
+
+        if (m_clearingTask == entt::null) {
+            auto& sWp = storageView.get<ecs::WorldPos>(*storageView.begin());
+
+            constexpr float storageRZHalf = config::CITY_STORAGE.resourceZoneWidth / 2.0f;
+            constexpr float houseRZWidth  = config::HOUSE_1.resourceZoneWidth;
+            constexpr float houseHitboxHalf = config::HOUSE_1.hitboxWidth / 2.0f;
+            float clearRadius = storageRZHalf + 2.0f * houseRZWidth + houseHitboxHalf + 1.5f;
+
+            m_clearingTask = createTask(registry,
+                {sWp.wx - clearRadius, sWp.wy - clearRadius},
+                {sWp.wx + clearRadius, sWp.wy + clearRadius},
+                true, true, false, {0,0}, {0,0});
+
+            if (m_clearingTask == entt::null) {
+                m_phase = ExpansionPhase::PlanInitialHousing;
+                core::SimLogger::get().log("[Expansion] Housing area already clear. Phase: PlanInitialHousing");
+            } else {
+                core::SimLogger::get().log("[Expansion] Clearing housing area around storage");
+            }
+        } else {
+            if (!registry.valid(m_clearingTask)) {
+                m_clearingTask = entt::null;
+                m_phase = ExpansionPhase::PlanInitialHousing;
+                core::SimLogger::get().log("[Expansion] Housing area cleared. Phase: PlanInitialHousing");
+            }
         }
         break;
     }
@@ -316,30 +245,33 @@ void OverseerSystem::planExpansion(entt::registry& registry, world::ChunkManager
 
         for (auto& pos : gridPositions) {
             if (placed >= housesNeeded) break;
-            if (!isValidBuildSpot(chunkManager, pos.x, pos.y)) continue;
-            if (overlapsExistingBuilding(registry, pos, config::HOUSE_1)) continue;
+            if (!canPlaceBuilding(registry, chunkManager, pos, config::HOUSE_1, false)) continue;
 
-            uint8_t elev = getElevationAt(chunkManager, pos.x, pos.y);
-            auto bEnt = placeBuilding(registry, config::HOUSE_1, pos, elev, false, m_globalTaskId);
-            clearBuildingSite(registry, config::HOUSE_1, pos, m_globalTaskId);
+            auto bEnt = spawnBuilding(registry, chunkManager, config::HOUSE_1, pos, false);
+
+            float buffer = 1.5f;
+            float hw = config::HOUSE_1.hitboxWidth / 2.0f + buffer;
+            float hh = config::HOUSE_1.hitboxHeight / 2.0f + buffer;
+            createTask(registry,
+                {pos.x - hw, pos.y - hh}, {pos.x + hw, pos.y + hh},
+                true, true, false, {0,0}, {0,0});
+
             queueBuildingForBuilders(registry, bEnt);
-
             m_pendingBuildings.push_back(bEnt);
             placed++;
 
-            std::cout << "[Overseer] House blueprint at (" << pos.x << ", " << pos.y << ")." << std::endl;
+            core::SimLogger::get().log("[Expansion] House blueprint at " + core::SimLogger::pos(pos.x, pos.y));
         }
 
         m_phase = ExpansionPhase::WaitInitialHousing;
-        std::cout << "[Overseer] Initial housing: " << placed << " houses planned for "
-                  << board.totalUnits << " units." << std::endl;
+        core::SimLogger::get().log("[Expansion] Initial housing: " + std::to_string(placed) + " houses planned for " + std::to_string(board.totalUnits) + " units. Phase: WaitInitialHousing");
         break;
     }
 
     case ExpansionPhase::WaitInitialHousing: {
         if (allBuildingsComplete(registry, m_pendingBuildings)) {
             m_phase = ExpansionPhase::PlanGrowthHousing;
-            std::cout << "[Overseer] All initial houses built. Planning growth expansion." << std::endl;
+            core::SimLogger::get().log("[Expansion] All initial houses built. Phase: PlanGrowthHousing");
         }
         break;
     }
@@ -369,21 +301,24 @@ void OverseerSystem::planExpansion(entt::registry& registry, world::ChunkManager
 
         for (auto& pos : gridPositions) {
             if (placed >= housesNeeded) break;
-            if (!isValidBuildSpot(chunkManager, pos.x, pos.y)) continue;
-            if (overlapsExistingBuilding(registry, pos, config::HOUSE_1)) continue;
+            if (!canPlaceBuilding(registry, chunkManager, pos, config::HOUSE_1, false)) continue;
 
-            uint8_t elev = getElevationAt(chunkManager, pos.x, pos.y);
-            auto bEnt = placeBuilding(registry, config::HOUSE_1, pos, elev, false, m_globalTaskId);
-            clearBuildingSite(registry, config::HOUSE_1, pos, m_globalTaskId);
+            auto bEnt = spawnBuilding(registry, chunkManager, config::HOUSE_1, pos, false);
+
+            float buffer = 1.5f;
+            float hw = config::HOUSE_1.hitboxWidth / 2.0f + buffer;
+            float hh = config::HOUSE_1.hitboxHeight / 2.0f + buffer;
+            createTask(registry,
+                {pos.x - hw, pos.y - hh}, {pos.x + hw, pos.y + hh},
+                true, true, false, {0,0}, {0,0});
+
             queueBuildingForBuilders(registry, bEnt);
-
             m_pendingBuildings.push_back(bEnt);
             placed++;
         }
 
         m_phase = ExpansionPhase::WaitGrowthHousing;
-        std::cout << "[Overseer] Growth: " << placed << " houses for " << growthUnits
-                  << " new units (pop: " << board.totalUnits << ")." << std::endl;
+        core::SimLogger::get().log("[Expansion] Growth: " + std::to_string(placed) + " houses for " + std::to_string(growthUnits) + " new units (pop: " + std::to_string(board.totalUnits) + "). Phase: WaitGrowthHousing");
         break;
     }
 
@@ -392,8 +327,7 @@ void OverseerSystem::planExpansion(entt::registry& registry, world::ChunkManager
 
         if (board.totalUnits > m_totalUnitsAtPlanTime) {
             m_phase = ExpansionPhase::PlanGrowthHousing;
-            std::cout << "[Overseer] Growth cycle complete. Pop: " << board.totalUnits
-                      << ". Starting next expansion." << std::endl;
+            core::SimLogger::get().log("[Expansion] Growth cycle complete. Pop: " + std::to_string(board.totalUnits) + ". Phase: PlanGrowthHousing");
         }
         break;
     }

@@ -4,4 +4,7 @@ cmake-build-release
 copy.py
 no_comments.py
 send.py
-profiler.log
+*build*/
+assets/
+pack/
+include/

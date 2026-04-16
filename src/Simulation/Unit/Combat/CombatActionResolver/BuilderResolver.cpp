@@ -2,6 +2,7 @@
 #include "ECS/Components.hpp"
 #include "ECS/Tags.hpp"
 #include "Core/Types.hpp"
+#include "Core/SimLogger.hpp"
 #include <algorithm>
 
 namespace wr::simulation {
@@ -74,6 +75,17 @@ void resolveBuilderAction(entt::registry& registry, entt::entity entity, ecs::Un
                 }
 
                 if (allConsumed) {
+                    if (woodToConsume > 0 || rockToConsume > 0) {
+                        auto& bPos = registry.get<ecs::WorldPos>(target);
+                        core::SimLogger::get().log("[Builder] Builder #" + std::to_string(core::SimLogger::eid(workerEnt))
+                            + " consumed " + std::to_string(std::max(0, woodToConsume)) + " wood, "
+                            + std::to_string(std::max(0, rockToConsume)) + " rock at House #"
+                            + std::to_string(core::SimLogger::eid(target))
+                            + " " + core::SimLogger::pos(bPos.wx, bPos.wy)
+                            + " — " + std::to_string(cData.woodRequired - std::max(0, woodToConsume)) + " wood, "
+                            + std::to_string(cData.rockRequired - std::max(0, rockToConsume)) + " rock remaining");
+                    }
+
                     cData.buildProgress = newProgress;
 
                     if (cData.buildProgress > 0.0f && !registry.all_of<ecs::SolidTag>(target)) {
@@ -81,6 +93,10 @@ void resolveBuilderAction(entt::registry& registry, entt::entity entity, ecs::Un
                     }
 
                     if (cData.buildProgress >= cData.maxTime) {
+                        auto& bPos = registry.get<ecs::WorldPos>(target);
+                        core::SimLogger::get().log("[Builder] House #" + std::to_string(core::SimLogger::eid(target))
+                            + " at " + core::SimLogger::pos(bPos.wx, bPos.wy) + " COMPLETE!");
+
                         cData.isBuilt = true;
                         cData.woodRequired = 0;
                         cData.rockRequired = 0;

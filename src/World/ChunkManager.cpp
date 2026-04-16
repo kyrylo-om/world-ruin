@@ -55,18 +55,17 @@ void ChunkManager::update(const math::Vec2f& cameraCenterWorldPx, rendering::Vie
         {
             std::shared_lock<std::shared_mutex> lock(m_chunkMutex);
             for (auto& [coord, chunk] : m_chunks) {
-                if (std::abs(coord.x - centerChunk.x) > m_renderDistanceChunks + 1 ||
-                    std::abs(coord.y - centerChunk.y) > m_renderDistanceChunks + 1) {
-
-                    if (chunk->state.load(std::memory_order_acquire) == ChunkState::Active) {
-                        toUnload.push_back(coord);
-                    }
+                if (std::abs(coord.x - centerChunk.x) > m_renderDistanceChunks ||
+                    std::abs(coord.y - centerChunk.y) > m_renderDistanceChunks) {
+                    toUnload.push_back(coord);
                 }
             }
         }
 
         if (!toUnload.empty()) {
-            unloadChunk(toUnload.front());
+            for (const auto& coord : toUnload) {
+                unloadChunk(coord);
+            }
         }
 
         m_lastCenterChunk = centerChunk;

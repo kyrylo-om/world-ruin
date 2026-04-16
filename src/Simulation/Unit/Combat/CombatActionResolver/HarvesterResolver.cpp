@@ -4,6 +4,7 @@
 #include "Simulation/Environment/ResourceSystem.hpp"
 #include "Rendering/TileHandler.hpp"
 #include "Core/Types.hpp"
+#include "Core/SimLogger.hpp"
 
 namespace wr::simulation {
 
@@ -30,6 +31,17 @@ void resolveHarvesterAction(entt::registry& registry, entt::entity entity, ecs::
                 }
 
                 if (targetHealth.current <= 0) {
+                    std::string resType = "resource";
+                    if (registry.all_of<ecs::TreeTag>(target)) resType = "Tree";
+                    else if (registry.all_of<ecs::RockTag>(target)) resType = "Rock";
+                    else if (registry.all_of<ecs::BushTag>(target)) resType = "Bush";
+                    auto& tWp = registry.get<ecs::WorldPos>(target);
+                    auto& wUData = registry.get<ecs::UnitData>(workerEnt);
+                    core::SimLogger::get().log("[Harvest] " + std::string(core::SimLogger::typeName(wUData.type))
+                        + " #" + std::to_string(core::SimLogger::eid(workerEnt))
+                        + " destroyed " + resType + " #" + std::to_string(core::SimLogger::eid(target))
+                        + " at " + core::SimLogger::pos(tWp.wx, tWp.wy));
+
                     auto& animState = registry.get<ecs::AnimationState>(workerEnt);
                     animState.isActionLocked = false;
                     animState.currentAnim = 0;

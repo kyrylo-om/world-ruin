@@ -90,17 +90,19 @@ set(SOURCES
         src/Simulation/Unit/Combat/CombatMovement.cpp
         src/Simulation/Unit/Combat/CombatAnimation.cpp
 
+        src/Simulation/BuildingPlacement.cpp
+
         # --- OVERSEER CORE ---
         src/Simulation/World/Overseer/OverseerSystem.cpp
         src/Simulation/World/Overseer/OverseerExpansion.cpp
         src/Simulation/World/Overseer/OverseerDemographics.cpp
 
-        # --- OVERSEER ECONOMY ---
+        # --- OVERSEER ECONOMY (NEW FOLDER) ---
         src/Simulation/World/Overseer/OverseerEconomy/EconomyManager.cpp
         src/Simulation/World/Overseer/OverseerEconomy/HarvestDirector.cpp
         src/Simulation/World/Overseer/OverseerEconomy/LogisticsDirector.cpp
 
-        # --- UNIT CONTROL SYSTEM ---
+        # --- UNIT CONTROL SYSTEM (NEW FOLDER) ---
         src/Simulation/Unit/UnitControlSystem/UnitControlSystem.cpp
         src/Simulation/Unit/UnitControlSystem/UnitCommandInterface.cpp
         src/Simulation/Unit/UnitControlSystem/UnitJobAssignment.cpp

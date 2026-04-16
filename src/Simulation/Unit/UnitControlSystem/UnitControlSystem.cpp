@@ -9,6 +9,7 @@
 #include "Config/DeveloperConfig.hpp"
 #include "Core/ThreadPool.hpp"
 #include "Core/Profiler.hpp"
+#include "Core/SimLogger.hpp"
 #include "ECS/Components.hpp"
 #include "ECS/Tags.hpp"
 #include <SFML/Window/Keyboard.hpp>
@@ -28,7 +29,7 @@ void applyBuildingCollisions(entt::registry& registry, entt::entity entity, ecs:
 UnitControlSystem::UnitControlSystem(world::ChunkManager& chunkManager)
     : m_chunkManager(chunkManager) {}
 
-void UnitControlSystem::update(entt::registry& registry, float dt, rendering::ViewDirection viewDir, const math::Vec2f& mouseWorldPos, bool isRightClicking, bool isTaskMode) noexcept {
+void UnitControlSystem::update(entt::registry& registry, float dt, rendering::ViewDirection viewDir, const math::Vec2f& mouseWorldPos, const math::Vec2f& simulationCenterWorld, bool isRightClicking, bool isTaskMode) noexcept {
 
     bool isBuilderMode = registry.ctx().contains<ecs::BuilderModeState>() && registry.ctx().get<ecs::BuilderModeState>().active;
 
@@ -48,6 +49,10 @@ void UnitControlSystem::update(entt::registry& registry, float dt, rendering::Vi
 
     bool isCtrlHeld = sf::Keyboard::isKeyPressed(sf::Keyboard::LControl) || sf::Keyboard::isKeyPressed(sf::Keyboard::RControl);
     bool isCancelCommand = isCtrlHeld && sf::Keyboard::isKeyPressed(sf::Keyboard::Q);
+
+    core::GlobalCoord simCenterBlockX = static_cast<core::GlobalCoord>(std::floor(simulationCenterWorld.x));
+    core::GlobalCoord simCenterBlockY = static_cast<core::GlobalCoord>(std::floor(simulationCenterWorld.y));
+    math::Vec2i64 simCenterChunk = math::worldToChunk(simCenterBlockX, simCenterBlockY);
 
     FastChunkCache chunkCache;
     std::vector<entt::entity> activeBuildings;
@@ -72,7 +77,7 @@ void UnitControlSystem::update(entt::registry& registry, float dt, rendering::Vi
     {
         core::ScopedTimer preLoopTimer("1.1_UCS_PreLoop");
 
-        chunkCache.build(m_chunkManager.getChunks());
+        chunkCache.build(m_chunkManager.getChunks(), simCenterChunk, config::SIMULATION_DISTANCE_CHUNKS);
         if (chunkCache.width > 0) {
             globalObstacles->init(chunkCache.minX * 64, chunkCache.minY * 64, chunkCache.width * 64, chunkCache.height * 64);
         }
@@ -82,6 +87,7 @@ void UnitControlSystem::update(entt::registry& registry, float dt, rendering::Vi
             auto solidViewHitbox = registry.view<ecs::SolidTag, ecs::WorldPos, ecs::Hitbox>();
             for (auto e : solidViewHitbox) {
                 auto& wp = wpStorage.get(e);
+                if (!chunkCache.containsWorld(wp.wx, wp.wy)) continue;
                 float rad = registry.get<ecs::Hitbox>(e).radius / 64.0f;
                 if (rad <= 0.4f) {
                     globalObstacles->set(static_cast<int64_t>(std::floor(wp.wx)), static_cast<int64_t>(std::floor(wp.wy)));
@@ -99,6 +105,7 @@ void UnitControlSystem::update(entt::registry& registry, float dt, rendering::Vi
             auto solidViewLogical = registry.view<ecs::SolidTag, ecs::LogicalPos>(entt::exclude<ecs::WorldPos>);
             for (auto e : solidViewLogical) {
                 auto& pos = lpStorage.get(e);
+                if (!chunkCache.containsBlock(pos.x, pos.y)) continue;
                 globalObstacles->set(pos.x, pos.y);
             }
         });
@@ -106,15 +113,23 @@ void UnitControlSystem::update(entt::registry& registry, float dt, rendering::Vi
         auto futUnitGrid = threadPool->enqueue([&]() { m_unitGrid.rebuild(registry, chunkCache, registry.view<ecs::UnitTag, ecs::WorldPos>()); });
         auto futSolidGrid = threadPool->enqueue([&]() { m_solidGrid.rebuild(registry, chunkCache, registry.view<ecs::SolidTag, ecs::WorldPos>()); });
 
+        {
+            core::ScopedTimer taskTimer("2.4_TaskSystem");
+            TaskSystem::update(registry);
+        }
+
         futObstacles.wait();
 
-        TaskSystem::update(registry);
         processGlobalCommands(registry, pJustPressed, isCancelCommand);
         UnitCommandSystem::processCommands(registry, m_chunkManager, pJustPressed, isCancelCommand, isRightClicking, mouseWorldPos, globalObstacles);
         UnitTaskSystem::assignWorkerTargets(registry, m_chunkManager, globalObstacles);
 
         auto buildingView = registry.view<ecs::BuildingTag, ecs::WorldPos, ecs::SolidTag>();
-        for (auto bEnt : buildingView) activeBuildings.push_back(bEnt);
+        for (auto bEnt : buildingView) {
+            const auto& bWp = buildingView.get<ecs::WorldPos>(bEnt);
+            if (!chunkCache.containsWorld(bWp.wx, bWp.wy)) continue;
+            activeBuildings.push_back(bEnt);
+        }
 
         futUnitGrid.wait();
         futSolidGrid.wait();
@@ -159,6 +174,8 @@ void UnitControlSystem::update(entt::registry& registry, float dt, rendering::Vi
                 auto& anim = animStorage.get(entity);
                 auto& lp = lpStorage.get(entity);
 
+                if (!chunkCache.containsWorld(wp.wx, wp.wy)) continue;
+
                 bool isSelected = selectedStorage.contains(entity);
                 ecs::ActionTarget* actionTarget = actionStorage.contains(entity) ? &actionStorage.get(entity) : nullptr;
                 ecs::Path* path = pathStorage.contains(entity) ? &pathStorage.get(entity) : nullptr;
@@ -167,7 +184,64 @@ void UnitControlSystem::update(entt::registry& registry, float dt, rendering::Vi
 
                 bool isZMoving = (wp.targetZ > -9000.0f) && (std::abs(wp.wz - wp.targetZ) > 0.1f);
                 bool isActivelyMoving = (std::abs(vel.dx) > 0.001f || std::abs(vel.dy) > 0.001f || wp.zJumpVel != 0.0f || wp.zJump > 0.0f || isZMoving);
-                bool isIdle = !isActivelyMoving && !path && !req && !actionTarget && !isSelected && !anim.isActionLocked && !hasTask;
+
+                // Stuck detection: push stationary units out of solid entities/buildings
+                bool stuckInSolid = false;
+                if (!isActivelyMoving) {
+                    entt::entity stationaryStuckIn = entt::null;
+                    float preX = wp.wx, preY = wp.wy;
+                    m_solidGrid.forEachNearby({wp.wx, wp.wy}, 1.5f, [&](const SpatialGridData& data) {
+                        if (data.entity == entity) return;
+                        float sdx = wp.wx - data.x;
+                        float sdy = wp.wy - data.y;
+                        float distSq = sdx * sdx + sdy * sdy;
+                        float minDist = 0.3f + data.radius;
+                        if (distSq < minDist * minDist) {
+                            stuckInSolid = true;
+                            stationaryStuckIn = data.entity;
+                            if (distSq > 0.001f) {
+                                float dist = std::sqrt(distSq);
+                                wp.wx += (sdx / dist) * (minDist - dist);
+                                wp.wy += (sdy / dist) * (minDist - dist);
+                            } else {
+                                wp.wx += minDist;
+                            }
+                        }
+                    });
+                    if (stuckInSolid) {
+                        std::string sType = "solid";
+                        if (registry.valid(stationaryStuckIn)) {
+                            if (registry.all_of<ecs::RockTag>(stationaryStuckIn)) sType = "Rock";
+                            else if (registry.all_of<ecs::TreeTag>(stationaryStuckIn)) sType = "Tree";
+                        }
+                        core::SimLogger::get().log("[StuckDetect] " + std::string(core::SimLogger::typeName(uData.type))
+                            + " #" + std::to_string(core::SimLogger::eid(entity))
+                            + " STATIONARY inside " + sType + " #" + std::to_string(core::SimLogger::eid(stationaryStuckIn))
+                            + " | pushed " + core::SimLogger::pos(preX, preY) + " -> " + core::SimLogger::pos(wp.wx, wp.wy));
+                    }
+                    if (!stuckInSolid) {
+                        for (auto bEnt : activeBuildings) {
+                            auto& bWp2 = registry.get<ecs::WorldPos>(bEnt);
+                            float bRad = 0.4f;
+                            if (auto* bhb = registry.try_get<ecs::Hitbox>(bEnt)) bRad = bhb->radius / 64.0f;
+                            float bMinX = bWp2.wx - bRad, bMaxX = bWp2.wx + bRad;
+                            float bMinY = bWp2.wy - bRad, bMaxY = bWp2.wy + bRad;
+                            if (wp.wx > bMinX && wp.wx < bMaxX && wp.wy > bMinY && wp.wy < bMaxY) {
+                                stuckInSolid = true;
+                                float toL = wp.wx - bMinX, toR = bMaxX - wp.wx;
+                                float toT = wp.wy - bMinY, toB = bMaxY - wp.wy;
+                                float minPush = std::min({toL, toR, toT, toB});
+                                if (minPush == toL)      wp.wx = bMinX - 0.3f;
+                                else if (minPush == toR) wp.wx = bMaxX + 0.3f;
+                                else if (minPush == toT) wp.wy = bMinY - 0.3f;
+                                else                     wp.wy = bMaxY + 0.3f;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                bool isIdle = !isActivelyMoving && !stuckInSolid && !path && !req && !actionTarget && !isSelected && !anim.isActionLocked && !hasTask;
 
                 if (isIdle) {
                     if (wr::config::ENABLE_UNIT_SLEEP_SYSTEM) localQueues.addIdleTag.push_back(entity);
@@ -198,9 +272,92 @@ void UnitControlSystem::update(entt::registry& registry, float dt, rendering::Vi
 
                 UnitPhysicsSystem::applyPhysicsAndCollisions(registry, entity, wp, vel, lp, anim, dt, chunkCache, m_solidGrid, m_unitGrid, pTimers);
 
-                bool movingAfterPhysics = (std::abs(vel.dx) > 0.001f || std::abs(vel.dy) > 0.001f || wp.zJumpVel != 0.0f || wp.zJump > 0.0f);
-                if (movingAfterPhysics) {
-                    applyBuildingCollisions(registry, entity, wp, activeBuildings);
+                applyBuildingCollisions(registry, entity, wp, activeBuildings);
+
+                // Post-movement stuck detection: if unit ended up overlapping a
+                // solid entity (path routed through it), push out and reroute.
+                {
+                    bool pushedOut = false;
+                    entt::entity stuckInEntity = entt::null;
+                    float stuckSolidX = 0, stuckSolidY = 0, stuckSolidRad = 0;
+                    float preFixX = wp.wx, preFixY = wp.wy;
+                    m_solidGrid.forEachNearby({wp.wx, wp.wy}, 1.5f, [&](const SpatialGridData& data) {
+                        if (data.entity == entity) return;
+                        if (actionTarget && data.entity == actionTarget->target) return;
+                        float sdx = wp.wx - data.x;
+                        float sdy = wp.wy - data.y;
+                        float distSq = sdx * sdx + sdy * sdy;
+                        float minDist = 0.3f + data.radius;
+                        if (distSq < minDist * minDist) {
+                            pushedOut = true;
+                            stuckInEntity = data.entity;
+                            stuckSolidX = data.x;
+                            stuckSolidY = data.y;
+                            stuckSolidRad = data.radius;
+                            if (distSq > 0.001f) {
+                                float dist = std::sqrt(distSq);
+                                float push = minDist - dist + 0.05f;
+                                wp.wx += (sdx / dist) * push;
+                                wp.wy += (sdy / dist) * push;
+                            } else {
+                                wp.wx += minDist;
+                            }
+                        }
+                    });
+                    if (pushedOut) {
+                        std::string solidType = "unknown";
+                        if (registry.valid(stuckInEntity)) {
+                            if (registry.all_of<ecs::RockTag>(stuckInEntity)) solidType = "Rock";
+                            else if (registry.all_of<ecs::TreeTag>(stuckInEntity)) solidType = "Tree";
+                            else if (registry.all_of<ecs::BuildingTag>(stuckInEntity)) solidType = "Building";
+                        }
+                        std::string targetStr = "none";
+                        if (actionTarget && registry.valid(actionTarget->target)) {
+                            if (registry.all_of<ecs::RockTag>(actionTarget->target)) targetStr = "Rock #" + std::to_string(core::SimLogger::eid(actionTarget->target));
+                            else if (registry.all_of<ecs::TreeTag>(actionTarget->target)) targetStr = "Tree #" + std::to_string(core::SimLogger::eid(actionTarget->target));
+                            else if (registry.all_of<ecs::TaskArea>(actionTarget->target)) targetStr = "Task #" + std::to_string(core::SimLogger::eid(actionTarget->target));
+                            else if (registry.all_of<ecs::BuildingTag>(actionTarget->target)) targetStr = "Building #" + std::to_string(core::SimLogger::eid(actionTarget->target));
+                            else targetStr = "Entity #" + std::to_string(core::SimLogger::eid(actionTarget->target));
+                        }
+                        core::SimLogger::get().log("[StuckDetect] " + std::string(core::SimLogger::typeName(uData.type))
+                            + " #" + std::to_string(core::SimLogger::eid(entity))
+                            + " OVERLAPPING " + solidType + " #" + std::to_string(core::SimLogger::eid(stuckInEntity))
+                            + " at " + core::SimLogger::pos(stuckSolidX, stuckSolidY)
+                            + " (solidRad=" + std::to_string(stuckSolidRad).substr(0, 4)
+                            + ") | unitPos: " + core::SimLogger::pos(preFixX, preFixY)
+                            + " -> " + core::SimLogger::pos(wp.wx, wp.wy)
+                            + " | hasPath=" + std::string(path ? "yes" : "no")
+                            + " hasReq=" + std::string(req ? "yes" : "no")
+                            + " | target=" + targetStr
+                            + " | pathFailures=" + std::to_string(wState.pathFailures)
+                            + " directMoveTimer=" + std::to_string(wState.directMoveTimer).substr(0, 4));
+                    }
+                    if (pushedOut && (path || req)) {
+                        localQueues.removePath.push_back(entity);
+                        localQueues.removePathRequest.push_back(entity);
+                        // Re-request path from the pushed-out position
+                        if (actionTarget && registry.valid(actionTarget->target)) {
+                            math::Vec2f tPos;
+                            if (registry.all_of<ecs::WorldPos>(actionTarget->target)) {
+                                auto& tw = registry.get<ecs::WorldPos>(actionTarget->target);
+                                tPos = {tw.wx, tw.wy};
+                            } else {
+                                tPos = {wp.wx, wp.wy};
+                            }
+                            core::SimLogger::get().log("[StuckDetect] " + std::string(core::SimLogger::typeName(uData.type))
+                                + " #" + std::to_string(core::SimLogger::eid(entity))
+                                + " REROUTING from " + core::SimLogger::pos(wp.wx, wp.wy)
+                                + " to target at " + core::SimLogger::pos(tPos.x, tPos.y));
+                            auto pathFuture = threadPool->enqueue([startWp = math::Vec2f{wp.wx, wp.wy}, tPos, &chunkManager = m_chunkManager, globalObstacles]() {
+                                return PathfindingSystem::findPath(startWp, tPos, chunkManager, *globalObstacles);
+                            });
+                            localQueues.setPathRequest.push_back({entity, pathFuture.share()});
+                        } else {
+                            core::SimLogger::get().log("[StuckDetect] " + std::string(core::SimLogger::typeName(uData.type))
+                                + " #" + std::to_string(core::SimLogger::eid(entity))
+                                + " pushed out but NO actionTarget to reroute to — clearing path");
+                        }
+                    }
                 }
             }
 

@@ -92,7 +92,7 @@ void DebrisSystem::update(entt::registry& registry, float dt, const rendering::C
     math::Vec2i64 camAbs = camera.getAbsolutePosition();
     float camWx = static_cast<float>(camAbs.x) + (camera.getSubPixelX() / 64.0f);
     float camWy = static_cast<float>(camAbs.y) + (camera.getSubPixelY() / 64.0f);
-    float cullRadius = (1600.0f / 64.0f) * std::max(1.0f, camera.getZoom());
+    float cullRadius = (1000.0f / 64.0f) * std::max(1.0f, camera.getZoom());
 
     auto oneShotView = registry.view<ecs::OneShotAnimTag, ecs::AnimationState, ecs::SpriteComponent, ecs::WorldPos>();
     std::vector<entt::entity> toDestroy;

@@ -2,6 +2,7 @@
 #include "Simulation/World/PathfindingSystem.hpp"
 #include "ECS/Components.hpp"
 #include "ECS/Tags.hpp"
+#include "Core/SimLogger.hpp"
 #include <cmath>
 #include <algorithm>
 
@@ -83,6 +84,8 @@ void evaluateJobTarget(entt::registry& registry, entt::entity entity, ecs::UnitD
                         }
 
                         if (compatible) {
+                            // Skip resource we just failed to reach
+                            if (r == wState.lastFailedTarget) continue;
                             auto& rWp = markedView.get<ecs::WorldPos>(r);
                             float dSq = (wp.wx - rWp.wx)*(wp.wx - rWp.wx) + (wp.wy - rWp.wy)*(wp.wy - rWp.wy);
                             if (dSq < bestDistSq) {
@@ -94,6 +97,9 @@ void evaluateJobTarget(entt::registry& registry, entt::entity entity, ecs::UnitD
                 }
 
                 if (bestRes != entt::null) {
+                    wState.pathFailures = 0;
+                    wState.directMoveTimer = 0.0f;
+                    wState.lastFailedTarget = entt::null;
                     localQueues.setActionTarget.push_back({entity, bestRes});
                     localQueues.complex.push_back([&registry, bestRes]() {
                         if (registry.valid(bestRes) && !registry.all_of<ecs::ClaimedTag>(bestRes)) {
@@ -185,6 +191,59 @@ void evaluateJobTarget(entt::registry& registry, entt::entity entity, ecs::UnitD
         } else {
             auto& w = registry.get<ecs::WorldPos>(actionTarget->target);
             tPos = {w.wx, w.wy};
+        }
+
+        // Detect unreachable targets: if unit keeps re-pathfinding to a
+        // target without reaching attack range, give up after 3 attempts
+        // so it picks a different target instead of circling forever.
+        // Applies to ALL unit types targeting entities with Health.
+        if (registry.all_of<ecs::Health>(actionTarget->target)) {
+            float tDx = tPos.x - wp.wx;
+            float tDy = tPos.y - wp.wy;
+            float tDistSq = tDx * tDx + tDy * tDy;
+            // Attack range ~1.0 blocks — if still outside that after a path,
+            // pathfinding couldn't get us close enough (partial path).
+            if (tDistSq > 1.2f) {
+                wState.pathFailures++;
+                std::string tgtType = "unknown";
+                if (registry.all_of<ecs::RockTag>(actionTarget->target)) tgtType = "Rock";
+                else if (registry.all_of<ecs::TreeTag>(actionTarget->target)) tgtType = "Tree";
+                else if (registry.all_of<ecs::LogTag>(actionTarget->target)) tgtType = "Log";
+                else if (registry.all_of<ecs::SmallRockTag>(actionTarget->target)) tgtType = "SmallRock";
+                else if (registry.all_of<ecs::BushTag>(actionTarget->target)) tgtType = "Bush";
+                else if (registry.all_of<ecs::BuildingTag>(actionTarget->target)) tgtType = "Building";
+                core::SimLogger::get().log("[StuckDetect] " + std::string(core::SimLogger::typeName(uData.type))
+                    + " #" + std::to_string(core::SimLogger::eid(entity))
+                    + " pathFailure " + std::to_string(wState.pathFailures) + "/3"
+                    + " for " + tgtType + " #" + std::to_string(core::SimLogger::eid(actionTarget->target))
+                    + " | dist=" + std::to_string(std::sqrt(tDistSq)).substr(0, 4)
+                    + " | unitPos=" + core::SimLogger::pos(wp.wx, wp.wy)
+                    + " targetPos=" + core::SimLogger::pos(tPos.x, tPos.y)
+                    + " | directMoveTimer=" + std::to_string(wState.directMoveTimer).substr(0, 4));
+                if (wState.pathFailures >= 3) {
+                    core::SimLogger::get().log("[StuckDetect] " + std::string(core::SimLogger::typeName(uData.type))
+                        + " #" + std::to_string(core::SimLogger::eid(entity))
+                        + " ABANDONING " + tgtType + " #" + std::to_string(core::SimLogger::eid(actionTarget->target))
+                        + " — unreachable after 3 path failures");
+                    wState.lastFailedTarget = actionTarget->target;
+                    wState.pathFailures = 0;
+                    wState.directMoveTimer = 0.0f;
+                    entt::entity tgt = actionTarget->target;
+                    localQueues.removeActionTarget.push_back(entity);
+                    localQueues.complex.push_back([&registry, tgt]() {
+                        if (registry.valid(tgt) && registry.all_of<ecs::ClaimedTag>(tgt))
+                            registry.remove<ecs::ClaimedTag>(tgt);
+                    });
+                    return;
+                }
+            } else {
+                if (wState.pathFailures > 0) {
+                    core::SimLogger::get().log("[StuckDetect] " + std::string(core::SimLogger::typeName(uData.type))
+                        + " #" + std::to_string(core::SimLogger::eid(entity))
+                        + " pathFailures RESET (within range, dist=" + std::to_string(std::sqrt(tDistSq)).substr(0, 4) + ")");
+                }
+                wState.pathFailures = 0;
+            }
         }
 
         auto pathFuture = threadPool->enqueue([startWp = math::Vec2f{wp.wx, wp.wy}, tPos, &chunkManager, globalObstacles]() {

@@ -39,6 +39,9 @@ namespace wr::ecs {
         std::vector<entt::entity> taskQueue;
         float workTimer{0.0f};
         math::Vec2f workOffset{0.0f, 0.0f};
+        int pathFailures{0};
+        float directMoveTimer{0.0f};
+        entt::entity lastFailedTarget{entt::null};
     };
 
     struct LogicalPos { int64_t x, y; };

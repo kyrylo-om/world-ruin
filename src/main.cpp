@@ -5,6 +5,7 @@
 #include <entt/entt.hpp>
 #include <iostream>
 #include <iomanip>
+#include <sstream>
 
 #include "Core/ThreadPool.hpp"
 #include "Core/Types.hpp"
@@ -110,6 +111,62 @@ static wr::ecs::GameMode showStartScreen(sf::RenderWindow& window) {
     }
 
     return wr::ecs::GameMode::Player;
+}
+
+struct SimEntityStats {
+    size_t total{0};
+    size_t characterUnits{0};
+    size_t resourceSources{0};
+    size_t resourceDrops{0};
+    size_t buildings{0};
+    size_t taskAreas{0};
+    size_t debris{0};
+    size_t terrainEntities{0};
+    size_t otherEntities{0};
+};
+
+static SimEntityStats collectEntityStats(entt::registry& registry) {
+    auto count = [](auto view) -> size_t {
+        return static_cast<size_t>(std::distance(view.begin(), view.end()));
+    };
+
+    SimEntityStats stats;
+    stats.total = registry.alive();
+
+    stats.characterUnits = count(registry.view<wr::ecs::UnitTag>());
+
+    stats.resourceSources =
+        count(registry.view<wr::ecs::TreeTag>()) +
+        count(registry.view<wr::ecs::RockTag>()) +
+        count(registry.view<wr::ecs::BushTag>());
+
+    stats.resourceDrops =
+        count(registry.view<wr::ecs::LogTag>()) +
+        count(registry.view<wr::ecs::SmallRockTag>());
+
+    stats.buildings = count(registry.view<wr::ecs::BuildingTag>());
+    stats.taskAreas = count(registry.view<wr::ecs::TaskArea>());
+    stats.debris = count(registry.view<wr::ecs::DebrisTag>());
+
+    stats.terrainEntities =
+        count(registry.view<wr::ecs::WaterTag>()) +
+        count(registry.view<wr::ecs::GroundTag>()) +
+        count(registry.view<wr::ecs::FoamTag>());
+
+    size_t categorizedTotal =
+        stats.characterUnits +
+        stats.resourceSources +
+        stats.resourceDrops +
+        stats.buildings +
+        stats.taskAreas +
+        stats.debris +
+        stats.terrainEntities;
+
+    if (stats.total > categorizedTotal) {
+        stats.otherEntities = stats.total - categorizedTotal;
+    }
+
+    return stats;
 }
 
 int main() {
@@ -226,6 +283,7 @@ int main() {
 
         int cachedFPS = 0;
         size_t cachedRamMB = 0;
+        size_t lastStatsMessageLength = 0;
 
         while (window.isOpen()) {
             float dt = clock.restart().asSeconds();
@@ -290,9 +348,15 @@ int main() {
                 isRightClick = sf::Mouse::isButtonPressed(sf::Mouse::Right);
             }
 
+            wr::math::Vec2i64 simCamAbs = camera.getAbsolutePosition();
+            wr::math::Vec2f simCenterWorld = {
+                static_cast<float>(simCamAbs.x) + (camera.getSubPixelX() / 64.0f),
+                static_cast<float>(simCamAbs.y) + (camera.getSubPixelY() / 64.0f)
+            };
+
             {
                 wr::core::ScopedTimer logicTimer("1_UnitControl_Update");
-                unitCtrl.update(registry, dt, currentViewDir, cursor.getExactHoveredWorldPos(), isRightClick, isTaskMode);
+                unitCtrl.update(registry, dt, currentViewDir, cursor.getExactHoveredWorldPos(), simCenterWorld, isRightClick, isTaskMode);
             }
 
             auto selectedView = registry.view<wr::ecs::SelectedTag, wr::ecs::WorldPos>();
@@ -353,13 +417,26 @@ int main() {
                 cachedRamMB = wr::core::Profiler::get().getProcessMemoryMB();
                 cachedFPS = frames;
                 double cpuUsage = wr::core::Profiler::get().getProcessCPUUsage();
+                SimEntityStats entityStats = collectEntityStats(registry);
 
-                std::cout << "\r[STATS] FPS: " << cachedFPS
-                          << " | RAM: " << cachedRamMB << "MB"
-                          << " | CPU: " << std::fixed << std::setprecision(1) << cpuUsage << "%"
-                          << " | Entities: " << registry.alive() << "    " << std::flush;
+                std::ostringstream statsMessage;
+                statsMessage << "[STATS] FPS: " << cachedFPS
+                             << " | RAM: " << cachedRamMB << "MB"
+                             << " | CPU: " << std::fixed << std::setprecision(1) << cpuUsage << "%"
+                             << " | Entities: " << entityStats.total
+                             << " | Units: " << entityStats.characterUnits
+                             << " | Sources: " << entityStats.resourceSources
+                             << " | Drops: " << entityStats.resourceDrops
+                             << " | Buildings: " << entityStats.buildings
+                             << " | Tasks: " << entityStats.taskAreas
+                             << " | Debris: " << entityStats.debris
+                             << " | Terrain: " << entityStats.terrainEntities
+                             << " | Other: " << entityStats.otherEntities;
 
-                wr::core::Profiler::get().logSystemStats(cachedFPS, cachedRamMB, registry.alive(), cpuUsage);
+                const std::string statsLine = statsMessage.str();
+                std::cout << "\r" << statsLine << "\033[K" << std::flush;
+
+                wr::core::Profiler::get().logSystemStats(cachedFPS, cachedRamMB, entityStats.total, cpuUsage);
 
                 frames = 0;
                 statsClock.restart();

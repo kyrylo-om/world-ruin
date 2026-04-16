@@ -7,6 +7,7 @@
 #include <vector>
 #include <algorithm>
 #include <memory>
+#include <cmath>
 
 namespace wr::simulation {
 
@@ -17,7 +18,18 @@ namespace wr::simulation {
         int64_t height = 0;
         std::vector<const world::Chunk*> grid;
 
+        void reset() {
+            minX = 9999999;
+            maxX = -9999999;
+            minY = 9999999;
+            maxY = -9999999;
+            width = 0;
+            height = 0;
+            grid.clear();
+        }
+
         void build(const std::unordered_map<math::Vec2i64, std::unique_ptr<world::Chunk>, math::SpatialHash>& chunks) {
+            reset();
             if (chunks.empty()) return;
             for (const auto& [coord, chunk] : chunks) {
                 if (chunk->state.load(std::memory_order_acquire) != world::ChunkState::Active) continue;
@@ -34,6 +46,50 @@ namespace wr::simulation {
                 if (chunk->state.load(std::memory_order_acquire) != world::ChunkState::Active) continue;
                 grid[(coord.y - minY) * width + (coord.x - minX)] = chunk.get();
             }
+        }
+
+        void build(const std::unordered_map<math::Vec2i64, std::unique_ptr<world::Chunk>, math::SpatialHash>& chunks,
+                   const math::Vec2i64& centerChunk,
+                   int64_t radiusChunks) {
+            reset();
+            if (chunks.empty() || radiusChunks < 0) return;
+
+            for (const auto& [coord, chunk] : chunks) {
+                if (chunk->state.load(std::memory_order_acquire) != world::ChunkState::Active) continue;
+                if (std::abs(coord.x - centerChunk.x) > radiusChunks || std::abs(coord.y - centerChunk.y) > radiusChunks) continue;
+
+                minX = std::min(minX, coord.x);
+                maxX = std::max(maxX, coord.x);
+                minY = std::min(minY, coord.y);
+                maxY = std::max(maxY, coord.y);
+            }
+
+            if (minX > maxX) return;
+
+            width = maxX - minX + 1;
+            height = maxY - minY + 1;
+            grid.assign(width * height, nullptr);
+
+            for (const auto& [coord, chunk] : chunks) {
+                if (chunk->state.load(std::memory_order_acquire) != world::ChunkState::Active) continue;
+                if (std::abs(coord.x - centerChunk.x) > radiusChunks || std::abs(coord.y - centerChunk.y) > radiusChunks) continue;
+                grid[(coord.y - minY) * width + (coord.x - minX)] = chunk.get();
+            }
+        }
+
+        [[nodiscard]] bool containsChunk(int64_t cx, int64_t cy) const noexcept {
+            return width > 0 && height > 0 && cx >= minX && cx <= maxX && cy >= minY && cy <= maxY;
+        }
+
+        [[nodiscard]] bool containsBlock(int64_t bx, int64_t by) const noexcept {
+            math::Vec2i64 chunkCoord = math::worldToChunk(bx, by);
+            return containsChunk(chunkCoord.x, chunkCoord.y);
+        }
+
+        [[nodiscard]] bool containsWorld(float wx, float wy) const noexcept {
+            int64_t bx = static_cast<int64_t>(std::floor(wx));
+            int64_t by = static_cast<int64_t>(std::floor(wy));
+            return containsBlock(bx, by);
         }
 
         const world::Chunk* get(int64_t cx, int64_t cy) const {

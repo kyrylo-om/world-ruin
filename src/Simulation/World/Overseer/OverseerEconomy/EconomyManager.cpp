@@ -26,11 +26,29 @@ void OverseerSystem::updateEconomy(entt::registry& registry) {
         else if (type == ecs::UnitType::Builder) board.popBuilder++;
     }
 
-    auto logsView = registry.view<ecs::LogTag>();
-    auto rocksView = registry.view<ecs::SmallRockTag>();
+    // Count resources only inside the city storage zone — scattered map resources
+    // are not usable for construction until couriers deliver them.
+    board.availWood = 0;
+    board.availRock = 0;
+    auto storageView = registry.view<ecs::CityStorageTag, ecs::WorldPos, ecs::ConstructionData>();
+    if (storageView.begin() != storageView.end()) {
+        auto sEnt = *storageView.begin();
+        auto& sWp = storageView.get<ecs::WorldPos>(sEnt);
+        auto& sCData = storageView.get<ecs::ConstructionData>(sEnt);
+        float sMinX = sWp.wx - sCData.resourceZoneWidth / 2.0f;
+        float sMaxX = sWp.wx + sCData.resourceZoneWidth / 2.0f;
+        float sMinY = sWp.wy - sCData.resourceZoneHeight / 2.0f;
+        float sMaxY = sWp.wy + sCData.resourceZoneHeight / 2.0f;
 
-    board.availWood = std::distance(logsView.begin(), logsView.end());
-    board.availRock = std::distance(rocksView.begin(), rocksView.end());
+        auto resView = registry.view<ecs::WorldPos, ecs::ResourceTag>();
+        for (auto e : resView) {
+            auto& rWp = resView.get<ecs::WorldPos>(e);
+            if (rWp.wx >= sMinX && rWp.wx <= sMaxX && rWp.wy >= sMinY && rWp.wy <= sMaxY) {
+                if (registry.all_of<ecs::LogTag>(e)) board.availWood++;
+                if (registry.all_of<ecs::SmallRockTag>(e)) board.availRock++;
+            }
+        }
+    }
 
     board.demandWood = 0;
     board.demandRock = 0;
@@ -60,6 +78,12 @@ void OverseerSystem::updateEconomy(entt::registry& registry) {
     }
 
     board.totalUnits = board.popWarrior + board.popLumberjack + board.popMiner + board.popCourier + board.popBuilder;
+
+    // Estimate next-stage demand: how many houses the next growth cycle will need
+    int nextStageHouses = std::max(1, static_cast<int>(std::ceil(
+        static_cast<float>(board.totalUnits) / 2.0f / static_cast<float>(config::UNITS_PER_HOUSE))));
+    board.nextStageWood = nextStageHouses * config::HOUSE_1.cost.wood;
+    board.nextStageRock = nextStageHouses * config::HOUSE_1.cost.rock;
 
     board.totalHouses = 0;
     auto houseOnlyView = registry.view<ecs::BuildingTag>(entt::exclude<ecs::CityStorageTag>);

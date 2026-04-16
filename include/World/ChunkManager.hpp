@@ -51,7 +51,7 @@ namespace wr::world {
         std::vector<std::unique_ptr<Chunk>> m_chunkPool;
         std::mutex m_poolMutex;
 
-        int64_t m_renderDistanceChunks = 2;
+        int64_t m_renderDistanceChunks = 1;
         rendering::ViewDirection m_currentViewDir = rendering::ViewDirection::North;
 
         math::Vec2i64 m_lastCenterChunk{0x7FFFFFFFFFFFFFFF, 0x7FFFFFFFFFFFFFFF};

@@ -1,6 +1,7 @@
 #include "../../../include/Simulation/World/TaskSystem.hpp"
 #include "ECS/Components.hpp"
 #include "ECS/Tags.hpp"
+#include "Core/SimLogger.hpp"
 #include <algorithm>
 #include <vector>
 
@@ -115,6 +116,11 @@ namespace wr::simulation {
         }
 
         for (auto e : completedTasks) {
+            if (registry.all_of<ecs::TaskArea>(e)) {
+                auto& ta = registry.get<ecs::TaskArea>(e);
+                core::SimLogger::get().log("[Task] Task #" + std::to_string(core::SimLogger::eid(e))
+                    + " (id=" + std::to_string(ta.id) + ") completed");
+            }
             std::vector<entt::entity> toUnmark;
             for (auto resEnt : registry.view<ecs::MarkedForHarvestTag>()) {
                 if (registry.get<ecs::MarkedForHarvestTag>(resEnt).taskEntity == e) {
@@ -132,7 +138,22 @@ namespace wr::simulation {
                 if (wState.currentTask == e) {
                     if (registry.all_of<ecs::WorkerTag>(wEnt)) registry.remove<ecs::WorkerTag>(wEnt);
                     wState.currentTask = entt::null;
-                    if (registry.all_of<ecs::ActionTarget>(wEnt)) registry.remove<ecs::ActionTarget>(wEnt);
+                    if (registry.all_of<ecs::ActionTarget>(wEnt)) {
+                        auto target = registry.get<ecs::ActionTarget>(wEnt).target;
+                        registry.remove<ecs::ActionTarget>(wEnt);
+                        if (registry.valid(target) && registry.all_of<ecs::ClaimedTag>(target))
+                            registry.remove<ecs::ClaimedTag>(target);
+                    }
+                    if (registry.all_of<ecs::Path>(wEnt)) registry.remove<ecs::Path>(wEnt);
+                    if (registry.all_of<ecs::PathRequest>(wEnt)) registry.remove<ecs::PathRequest>(wEnt);
+                    if (registry.all_of<ecs::AnimationState>(wEnt)) {
+                        auto& anim = registry.get<ecs::AnimationState>(wEnt);
+                        if (anim.isActionLocked) {
+                            anim.isActionLocked = false;
+                            anim.currentAnim = 0;
+                            anim.currentFrame = 0;
+                        }
+                    }
                 }
             }
 

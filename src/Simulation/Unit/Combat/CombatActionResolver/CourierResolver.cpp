@@ -4,6 +4,7 @@
 #include "Simulation/Environment/ResourceSystem.hpp"
 #include "Rendering/TileHandler.hpp"
 #include "Core/Types.hpp"
+#include "Core/SimLogger.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -16,6 +17,21 @@ void resolveCourierAction(entt::registry& registry, entt::entity entity, ecs::Un
         if (uData.heldItem != ecs::HeldItem::None) {
             auto itemToDrop = uData.heldItem;
             auto itemSubtype = uData.heldItemSubtype;
+
+            {
+                std::string dest = "unknown";
+                if (registry.all_of<ecs::BuildingTag>(actionTarget->target)) {
+                    auto& bWp = registry.get<ecs::WorldPos>(actionTarget->target);
+                    if (registry.all_of<ecs::CityStorageTag>(actionTarget->target))
+                        dest = "City Storage at " + core::SimLogger::pos(bWp.wx, bWp.wy);
+                    else
+                        dest = "House #" + std::to_string(core::SimLogger::eid(actionTarget->target)) + " at " + core::SimLogger::pos(bWp.wx, bWp.wy);
+                } else {
+                    dest = "task dropoff";
+                }
+                core::SimLogger::get().log("[Courier] Courier #" + std::to_string(core::SimLogger::eid(entity))
+                    + " dropped " + core::SimLogger::itemName(itemToDrop) + " at " + dest);
+            }
 
             uData.heldItem = ecs::HeldItem::None;
             uData.heldItemSubtype = 0;
@@ -124,7 +140,7 @@ void resolveCourierAction(entt::registry& registry, entt::entity entity, ecs::Un
     }
 
     else {
-        dq.complex.push_back([&registry, workerEnt = entity, target = actionTarget->target]() {
+        dq.complex.push_back([&registry, workerEnt = entity, target = actionTarget->target, pickupPos = math::Vec2f{wp.wx, wp.wy}]() {
             if (!registry.valid(target) || !registry.valid(workerEnt)) return;
 
             auto& anim = registry.get<ecs::AnimationState>(workerEnt);
@@ -132,11 +148,21 @@ void resolveCourierAction(entt::registry& registry, entt::entity entity, ecs::Un
             bool destroyedByCourier = false;
 
             if (registry.all_of<ecs::LogTag>(target)) {
+                auto& tWp = registry.get<ecs::WorldPos>(target);
+                core::SimLogger::get().log("[Courier] Courier #" + std::to_string(core::SimLogger::eid(workerEnt))
+                    + " picked up Log #" + std::to_string(core::SimLogger::eid(target))
+                    + " at " + core::SimLogger::pos(tWp.wx, tWp.wy));
+
                 uData.heldItem = ecs::HeldItem::Wood;
                 uData.heldItemSubtype = registry.get<ecs::ResourceData>(target).type;
                 registry.destroy(target);
                 destroyedByCourier = true;
             } else if (registry.all_of<ecs::SmallRockTag>(target)) {
+                auto& tWp = registry.get<ecs::WorldPos>(target);
+                core::SimLogger::get().log("[Courier] Courier #" + std::to_string(core::SimLogger::eid(workerEnt))
+                    + " picked up SmallRock #" + std::to_string(core::SimLogger::eid(target))
+                    + " at " + core::SimLogger::pos(tWp.wx, tWp.wy));
+
                 uData.heldItem = ecs::HeldItem::Rock;
                 uData.heldItemSubtype = registry.get<ecs::ResourceData>(target).type;
                 registry.destroy(target);

@@ -61,7 +61,7 @@ namespace wr::simulation {
     public:
         explicit UnitControlSystem(world::ChunkManager& chunkManager);
 
-        void update(entt::registry& registry, float dt, rendering::ViewDirection viewDir, const math::Vec2f& mouseWorldPos, bool isRightClicking, bool isTaskMode) noexcept;
+        void update(entt::registry& registry, float dt, rendering::ViewDirection viewDir, const math::Vec2f& mouseWorldPos, const math::Vec2f& simulationCenterWorld, bool isRightClicking, bool isTaskMode) noexcept;
 
     private:
         world::ChunkManager& m_chunkManager;

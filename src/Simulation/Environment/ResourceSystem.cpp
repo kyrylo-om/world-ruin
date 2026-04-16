@@ -1,5 +1,6 @@
 #include "../../../include/Simulation/Environment/ResourceSystem.hpp"
 #include "../../../include/Config/ResourceConfig.hpp"
+#include "Core/SimLogger.hpp"
 #include "ECS/Components.hpp"
 #include "ECS/Tags.hpp"
 #include "Rendering/TileHandler.hpp"
@@ -54,6 +55,7 @@ void ResourceSystem::spawnLogs(entt::registry& registry, const rendering::TileHa
 
         registry.emplace<ecs::WalkableTag>(log);
         registry.emplace<ecs::ResourceData>(log, forcedType, false, 0.0f);
+        registry.emplace<ecs::ActiveResourceUpdateTag>(log);
 
         registry.emplace<ecs::LogTag>(log);
         registry.emplace<ecs::ResourceTag>(log);
@@ -138,6 +140,7 @@ void ResourceSystem::spawnSmallRocks(entt::registry& registry, const rendering::
         uint8_t rType = forcedType;
         if (rType == 0) rType = (rand() % 2 == 0) ? 1 : 3;
         registry.emplace<ecs::ResourceData>(rock, rType, false, 0.0f);
+        registry.emplace<ecs::ActiveResourceUpdateTag>(rock);
 
         registry.emplace<ecs::SmallRockTag>(rock);
         registry.emplace<ecs::ResourceTag>(rock);
@@ -183,6 +186,7 @@ void ResourceSystem::spawnSmallRocks(entt::registry& registry, const rendering::
 
 void ResourceSystem::onResourceHit(entt::registry& registry, entt::entity resource, const rendering::TileHandler& tiles) {
     if (auto* resData = registry.try_get<ecs::ResourceData>(resource)) {
+        registry.emplace_or_replace<ecs::ActiveResourceUpdateTag>(resource);
         resData->shakeTimer = 0.15f;
         const auto* wp = registry.try_get<ecs::WorldPos>(resource);
 
@@ -218,10 +222,18 @@ void ResourceSystem::onResourceDestroyed(entt::registry& registry, entt::entity 
         }
         spawnRockParticles(registry, tiles, {wp->wx, wp->wy}, wp->wz, rockType, true);
 
+        int dropCount = 0;
         if (rockType == 2) {
-            spawnSmallRocks(registry, tiles, {wp->wx, wp->wy}, wp->wz, config::ROCK_DROP_TYPE_2, chunkManager, forwardTaskEnt, false);
+            dropCount = config::ROCK_DROP_TYPE_2;
+            spawnSmallRocks(registry, tiles, {wp->wx, wp->wy}, wp->wz, dropCount, chunkManager, forwardTaskEnt, false);
         } else if (rockType == 4) {
-            spawnSmallRocks(registry, tiles, {wp->wx, wp->wy}, wp->wz, config::ROCK_DROP_TYPE_4, chunkManager, forwardTaskEnt, false);
+            dropCount = config::ROCK_DROP_TYPE_4;
+            spawnSmallRocks(registry, tiles, {wp->wx, wp->wy}, wp->wz, dropCount, chunkManager, forwardTaskEnt, false);
+        }
+        if (dropCount > 0) {
+            core::SimLogger::get().log("[Drops] Rock at " + core::SimLogger::pos(wp->wx, wp->wy)
+                + " spawned " + std::to_string(dropCount) + " small rock(s)"
+                + (forwardTaskEnt != entt::null ? " (marked for task)" : ""));
         }
 
     } else if (registry.all_of<ecs::TreeTag>(resource)) {
@@ -235,6 +247,10 @@ void ResourceSystem::onResourceDestroyed(entt::registry& registry, entt::entity 
             else if (resData->type == 4) logCount = config::TREE_DROP_TYPE_4;
 
             spawnLogs(registry, tiles, {wp->wx, wp->wy}, wp->wz, logCount, chunkManager, forwardTaskEnt, false);
+
+            core::SimLogger::get().log("[Drops] Tree at " + core::SimLogger::pos(wp->wx, wp->wy)
+                + " spawned " + std::to_string(logCount) + " log(s)"
+                + (forwardTaskEnt != entt::null ? " (marked for task)" : ""));
         }
     } else if (registry.all_of<ecs::BushTag>(resource)) {
         spawnBushParticles(registry, tiles, {wp->wx, wp->wy}, wp->wz, true);

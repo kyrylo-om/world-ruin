@@ -89,16 +89,11 @@ void CursorTaskSystem::update(entt::registry& registry, float dt) {
             }
             if (hasCourier) {
                 if (pArea.collectFutureDrops) {
-
                     pArea.collectFutureDrops = false;
                 } else {
-
-                    bool hasDestination = pArea.hasDropoff || !pArea.targetBuildings.empty() || hasCityStorage;
-                    if (hasDestination) {
-                        pArea.collectFutureDrops = true;
-                        if (!pArea.hasDropoff && hasCityStorage) {
-                            pArea.useCityStorage = true;
-                        }
+                    pArea.collectFutureDrops = true;
+                    if (!pArea.hasDropoff && hasCityStorage) {
+                        pArea.useCityStorage = true;
                     }
                 }
             }
@@ -138,57 +133,7 @@ void CursorTaskSystem::update(entt::registry& registry, float dt) {
             }
         }
 
-        auto resView = registry.view<ecs::WorldPos, ecs::ResourceTag>();
-        for (auto e : resView) {
-            auto& wp = resView.get<ecs::WorldPos>(e);
-            bool match = false;
-
-            for (const auto& rect : pArea.areas) {
-                float minX = std::min(rect.startWorld.x, rect.endWorld.x);
-                float maxX = std::max(rect.startWorld.x, rect.endWorld.x);
-                float minY = std::min(rect.startWorld.y, rect.endWorld.y);
-                float maxY = std::max(rect.startWorld.y, rect.endWorld.y);
-
-                if (wp.wx >= minX && wp.wx <= maxX && wp.wy >= minY && wp.wy <= maxY) {
-                    if (rect.includeTrees && registry.all_of<ecs::TreeTag>(e)) match = true;
-                    if (rect.includeRocks && registry.all_of<ecs::RockTag>(e)) match = true;
-                    if (rect.includeSmallRocks && registry.all_of<ecs::SmallRockTag>(e)) match = true;
-                    if (rect.includeBushes && registry.all_of<ecs::BushTag>(e)) match = true;
-                    if (rect.includeLogs && registry.all_of<ecs::LogTag>(e)) match = true;
-                    if (match) break;
-                }
-            }
-
-            if (match && pArea.hasDropoff) {
-                float dMinX = std::min(pArea.dropoffStart.x, pArea.dropoffEnd.x);
-                float dMaxX = std::max(pArea.dropoffStart.x, pArea.dropoffEnd.x);
-                float dMinY = std::min(pArea.dropoffStart.y, pArea.dropoffEnd.y);
-                float dMaxY = std::max(pArea.dropoffStart.y, pArea.dropoffEnd.y);
-                if (wp.wx >= dMinX && wp.wx <= dMaxX && wp.wy >= dMinY && wp.wy <= dMaxY) {
-                    match = false;
-                }
-            }
-
-            if (match) {
-                auto bView = registry.view<ecs::BuildingTag, ecs::WorldPos, ecs::ConstructionData>();
-                for (auto bEnt : bView) {
-                    auto& bWp = bView.get<ecs::WorldPos>(bEnt);
-                    auto& cData = bView.get<ecs::ConstructionData>(bEnt);
-                    if (!cData.isBuilt || registry.all_of<ecs::CityStorageTag>(bEnt)) {
-                        float bMinX = bWp.wx - cData.resourceZoneWidth / 2.0f;
-                        float bMaxX = bWp.wx + cData.resourceZoneWidth / 2.0f;
-                        float bMinY = bWp.wy - cData.resourceZoneHeight / 2.0f;
-                        float bMaxY = bWp.wy + cData.resourceZoneHeight / 2.0f;
-                        if (wp.wx >= bMinX && wp.wx <= bMaxX && wp.wy >= bMinY && wp.wy <= bMaxY) {
-                            match = false;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if (match) registry.emplace<ecs::PreviewHarvestTag>(e, sf::Color(255, 255, 255, 255));
-        }
+        TaskFinalizer::scanResources(registry, pArea);
     }
 
     if (currentEnter && !m_prevEnter) {
@@ -201,7 +146,11 @@ void CursorTaskSystem::update(entt::registry& registry, float dt) {
             if (needsDropoff && !pArea.hasDropoff && !(hasCityStorage && pArea.useCityStorage)) {
                 pArea.errorTimer = 1.0f;
             } else {
-                TaskFinalizer::finalizeTask(registry, pArea, m_globalTaskId);
+                std::vector<entt::entity> workers;
+                auto selectedUnits = registry.view<ecs::SelectedTag, ecs::UnitData, ecs::WorkerState>();
+                for (auto e : selectedUnits) workers.push_back(e);
+
+                TaskFinalizer::finalizeTask(registry, pArea, m_globalTaskId, workers);
                 m_taskModeActive = false;
 
                 if (!registry.ctx().contains<ecs::TaskModeState>()) {
